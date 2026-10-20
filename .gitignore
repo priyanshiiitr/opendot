@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.npm-cache/
+.electron-cache/
+.venv/
+__pycache__/
+*.pyc
+backend/.env
+backend/data/
+backend/*.db
+backend/test_*.db
