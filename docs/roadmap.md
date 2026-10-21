@@ -1,21 +1,21 @@
 # Roadmap
 
 - [x] Milestone 0: workspace inspection and architecture plan
-- [x] Milestone 1: runnable desktop chat (backend tests, mock streaming, SQLite persistence, Electron launch, restart persistence, and unavailable-backend UI handling verified)
-- [x] Milestone 2: bounded agent loop, validated local tools, approvals, execution events, cancellation endpoint, persisted traces, frontend terminal-event handling, and automated coverage without paid API calls
-- [ ] Milestone 3: controlled Playwright browser automation
+- [x] Milestone 1: runnable desktop chat
+- [x] Milestone 2: bounded agent loop, validated local tools, approvals, execution events
+- [x] Milestone 3 (initial slice): Playwright browser tools + fail-closed navigation policy + isolated context + fixture tests
+- [ ] Milestone 3 (hardening): richer UI for screenshots, host allowlists for production browsing, live research demos
 - [ ] Milestone 4: one connector with OAuth and audit records
 - [ ] Milestone 5: configurable teammates and bounded delegation
 - [ ] Milestone 6: controlled desktop operations and resumable work
 
-## Milestone 2 acceptance (verified in automation)
+## Milestone 3 security gates
 
-1. Ordinary mock chat still streams and persists.
-2. Mock provider emits structured `calculate` / time / approval tool calls.
-3. Registry validates and executes registered tools only.
-4. Actual tool results are returned to the provider for the final answer.
-5. Iteration and tool-call limits stop runaway loops.
-6. Approval is required for `demo_request_approval`; reject / stale / duplicate decisions cannot authorize unintended execution.
-7. Frontend parses execution and approval SSE events; Approve / Reject controls are wired.
-8. xAI streaming fragment assembly is unit-tested with mocked HTTP/SSE.
-9. No paid model calls are made by the test suite.
+1. [x] Only `http`/`https`; unsupported schemes fail closed
+2. [x] Localhost/private/link-local/metadata blocked after DNS/IP checks
+3. [x] Redirect targets rechecked (fixture redirect-to-private test)
+4. [x] Isolated Playwright context (no user Chrome profile)
+5. [x] Page content cannot change PermissionBroker; prompt-injection fixture refused by mock final answer
+6. [x] `browser_click` / `browser_type` require approval
+7. [x] Fixture mode is explicit and port-scoped; default app mode keeps it off
+8. [x] Tests use local fixtures/mocks only — no probing of real internal networks; no paid API calls

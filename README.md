@@ -1,6 +1,6 @@
 # AI Teammates
 
-A local-first desktop AI teammate. Milestone 1 delivers desktop chat with streaming and persistence. Milestone 2 adds a bounded, backend-controlled agent loop with deterministic local tools, approvals, execution events, and durable traces.
+A local-first desktop AI teammate. Milestone 2 adds a bounded agent loop with local tools and approvals. Milestone 3 adds **Playwright browser tools** with fail-closed navigation policy and isolated browser contexts.
 
 ## Prerequisites
 
@@ -15,10 +15,13 @@ npm install
 py -3.14 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r backend\requirements.txt
+python -m playwright install chromium
 Copy-Item backend\.env.example backend\.env
 ```
 
-Keep `AI_TEAMMATES_MODEL_PROVIDER=mock` for offline development. To use xAI, set `AI_TEAMMATES_MODEL_PROVIDER=xai` and put the API key in `backend/.env`. The key is read only by Python and never returned to the renderer.
+Keep `AI_TEAMMATES_MODEL_PROVIDER=mock` for offline development. Keep `AI_TEAMMATES_BROWSER_FIXTURE_MODE=false` in normal use — fixture mode is **test-only**.
+
+To use xAI, set `AI_TEAMMATES_MODEL_PROVIDER=xai` and put the API key in `backend/.env`. The key is read only by Python and never returned to the renderer.
 
 ## Run
 
@@ -39,14 +42,6 @@ npm run dev
 
 Health check: `http://127.0.0.1:8000/health`.
 
-If Electron was installed with `npm install --ignore-scripts`, repair it with a project-local cache:
-
-```powershell
-$env:npm_config_cache = "$PWD\.npm-cache"
-$env:electron_config_cache = "$PWD\.electron-cache"
-npm rebuild electron
-```
-
 ## Verify
 
 ```powershell
@@ -57,25 +52,32 @@ npm test
 npm run build
 ```
 
-Or, with the venv activated: `cd backend` then `python -m pytest`. `pytest.ini` adds the backend package root to `pythonpath`.
+## Milestone 2 prompts (still work)
 
-## Milestone 2: safe local agent loop
+- `add 12 plus 30`
+- `what time is it?`
+- `request approval`
 
-In mock mode, try:
+## Milestone 3: browser teammate (fixture / mock)
 
-- `add 12 plus 30` — structured `calculate` tool call, real arithmetic, final answer uses the tool result
-- `what time is it?` — `get_current_time` with timezone `Asia/Calcutta` by default
-- `request approval` — `demo_request_approval` pauses for Approve / Reject; rejection never executes
+Browser tools are registered in the same `ToolRegistry`. Navigation allows only `http`/`https`, validates DNS/IPs, blocks private/loopback/metadata destinations, and rechecks after redirects. Playwright uses a fresh isolated **browser context** (not your everyday Chrome profile).
 
-The backend validates JSON arguments with Pydantic, enforces iteration and tool-call limits, times out tool handlers, and fails closed for unknown tools. Mock mode is offline. xAI tool-call streaming is unit-tested with mocked SSE chunks; live xAI verification still needs a compatible account and model access.
+Automated tests serve HTML under `backend/tests/fixtures/browser/` with an explicit fixture-mode exception. In normal app mode that exception is off, so local/private destinations fail closed.
+
+Mock scenarios (require fixture server + fixture settings used by tests):
+
+- `research startups` → `browser_open` → `browser_extract` → grounded shortlist
+- `prompt injection page` → snapshot treated as untrusted; refuses to follow page instructions
+
+`browser_click` and `browser_type` require user approval via the existing approval UI.
 
 ## What this app intentionally does not do yet
 
-No computer control, shell execution, browser automation, Telegram/Gmail/GitHub connectors, or multi-agent delegation. Those are later milestones.
+No OS-level computer use, unrestricted web crawling in CI, Telegram/Gmail/GitHub connectors, or multi-agent delegation.
 
 ## Environment note
 
-If Electron starts as Node and `app` is undefined, remove `ELECTRON_RUN_AS_NODE` for that launch only:
+If Electron starts as Node and `app` is undefined:
 
 ```powershell
 Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue

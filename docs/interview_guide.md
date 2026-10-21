@@ -46,3 +46,18 @@ Use these answers only for features that exist in this repository. Do not claim 
 
 15. **What is the difference between a tool call and a tool result message?**
     A tool call is the model’s structured request (`id`, name, arguments). A tool result is the backend’s authoritative outcome associated with that same `tool_call_id`, which subsequent provider turns must include.
+
+16. **Why Playwright browser automation before full computer use?**
+    Browsers expose structured pages, fixtures, and network policy. You can block private IPs and test with local HTML. OS mouse/keyboard control is broader, harder to sandbox, and harder to evaluate safely.
+
+17. **What is the difference between a browser process and a browser context?**
+    The process is the Chromium executable. A context is an isolated profile-like sandbox (cookies, storage) inside that process. We create a fresh context so the agent never inherits the user’s everyday logins.
+
+18. **How do you stop an agent from reaching localhost or cloud metadata?**
+    Allow only http/https, resolve DNS, classify every resolved IP with `ipaddress`, block loopback/private/link-local/metadata, and re-validate the final URL after redirects. Fail closed when unsure.
+
+19. **How do you handle webpage prompt injection?**
+    Treat page text as untrusted evidence. Permissions and approvals stay in backend code the page cannot call. The mock final answer explicitly refuses instructions to self-approve or open internal URLs; tests cover that fixture.
+
+20. **Why is a test-only fixture exception required?**
+    Automated tests need local HTML without hitting the public internet, but normal app mode must not browse arbitrary local/private services. The exception is host+port scoped and disabled by default.

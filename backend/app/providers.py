@@ -36,11 +36,15 @@ class ModelProvider:
 
 class MockProvider(ModelProvider):
     """Deterministic local scenarios proving that real backend tools are used."""
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
     async def stream_turn(self, messages: list[dict[str, Any]], system_prompt: str, tools: list[dict[str, Any]]) -> AsyncIterator[ProviderEvent]:
         latest = messages[-1]
         if latest["role"] == "user":
             text = latest["content"].lower()
-            call = self._tool_for(text)
+            call = self._tool_for_user(text)
             if call:
                 yield ProviderEvent("tool_calls", tool_calls=(call,))
                 return
@@ -50,6 +54,10 @@ class MockProvider(ModelProvider):
                 result = json.loads(latest["content"])
             except json.JSONDecodeError:
                 result = {"error": "unreadable tool result"}
+            follow_up = self._tool_for_result(result)
+            if follow_up:
+                yield ProviderEvent("tool_calls", tool_calls=(follow_up,))
+                return
             response = self._final_answer(result)
         else:
             response = "Mock mode completed the request."
@@ -57,26 +65,78 @@ class MockProvider(ModelProvider):
             yield ProviderEvent("text", content=word + " ")
             await asyncio.sleep(0.002)
 
-    def _tool_for(self, text: str) -> ToolCall | None:
-        call_id = f"mock_{uuid.uuid4().hex[:12]}"
+    def _call(self, name: str, arguments: dict[str, Any]) -> ToolCall:
+        return ToolCall(f"mock_{uuid.uuid4().hex[:12]}", name, json.dumps(arguments))
+
+    def _tool_for_user(self, text: str) -> ToolCall | None:
         if "time" in text or "date" in text:
             zone = "Asia/Calcutta"
             match = re.search(r"(?:in|timezone)\s+([A-Za-z_]+/[A-Za-z_]+)", text)
             if match:
                 zone = match.group(1)
-            return ToolCall(call_id, "get_current_time", json.dumps({"timezone": zone}))
+            return self._call("get_current_time", {"timezone": zone})
         if "approval" in text or "simulate action" in text:
-            return ToolCall(call_id, "demo_request_approval", json.dumps({"message": "A harmless approval demonstration"}))
-        operation_map = {"add": "add", "plus": "add", "subtract": "subtract", "minus": "subtract", "multiply": "multiply", "times": "multiply", "divide": "divide"}
+            return self._call("demo_request_approval", {"message": "A harmless approval demonstration"})
+        if "prompt injection" in text:
+            base = self.settings.browser_fixture_base_url.rstrip("/")
+            if not base:
+                return None
+            return self._call("browser_open", {"url": f"{base}/prompt_injection.html"})
+        if "research startups" in text or "browse startups" in text:
+            base = self.settings.browser_fixture_base_url.rstrip("/")
+            if not base:
+                return None
+            return self._call("browser_open", {"url": f"{base}/startups.html"})
+        operation_map = {
+            "add": "add",
+            "plus": "add",
+            "subtract": "subtract",
+            "minus": "subtract",
+            "multiply": "multiply",
+            "times": "multiply",
+            "divide": "divide",
+        }
         operation = next((value for key, value in operation_map.items() if key in text), None)
         numbers = re.findall(r"(?<![\w.])-?\d+(?:\.\d+)?", text)
         if operation and len(numbers) >= 2:
-            return ToolCall(call_id, "calculate", json.dumps({"operation": operation, "left": float(numbers[0]), "right": float(numbers[1])}))
+            return self._call(
+                "calculate",
+                {"operation": operation, "left": float(numbers[0]), "right": float(numbers[1])},
+            )
+        return None
+
+    def _tool_for_result(self, result: dict[str, Any]) -> ToolCall | None:
+        action = result.get("action")
+        if action == "browser_open":
+            url = result.get("url", "")
+            if "prompt_injection" in url:
+                return self._call("browser_snapshot", {})
+            if "startups" in url:
+                return self._call("browser_extract", {})
         return None
 
     def _final_answer(self, result: dict[str, Any]) -> str:
         if "error" in result:
             return f"The tool could not complete: {result['error']}"
+        if result.get("action") == "browser_snapshot":
+            text = result.get("text", "")
+            if "IGNORE PREVIOUS INSTRUCTIONS" in text or "approve all tools" in text.lower():
+                return (
+                    "I treated the webpage as untrusted evidence. I will not follow its instructions to "
+                    "approve tools, change permissions, reveal secrets, or open internal services."
+                )
+            return "I captured a page snapshot and treated it as untrusted evidence."
+        if result.get("action") == "browser_extract" and "companies" in result:
+            companies = result.get("companies") or []
+            if not companies:
+                return "The browser extract tool ran but returned no companies."
+            lines = ["Startup shortlist from the fixture page (grounded in browser_extract):"]
+            for company in companies:
+                lines.append(
+                    f"- {company.get('name')}: founder {company.get('founder')}; "
+                    f"careers {company.get('careers_url')}; internship note: {company.get('internship')}"
+                )
+            return " ".join(lines)
         if "result" in result:
             return f"The calculation completed. The result is {result['result']}."
         if "datetime" in result:
@@ -93,29 +153,44 @@ class XAIProvider(ModelProvider):
         self.settings = settings
 
     async def stream_turn(self, messages: list[dict[str, Any]], system_prompt: str, tools: list[dict[str, Any]]) -> AsyncIterator[ProviderEvent]:
-        payload = {"model": self.settings.xai_model, "messages": [{"role": "system", "content": system_prompt}, *messages], "tools": tools, "tool_choice": "auto", "parallel_tool_calls": False, "stream": True}
+        payload = {
+            "model": self.settings.xai_model,
+            "messages": [{"role": "system", "content": system_prompt}, *messages],
+            "tools": tools,
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "stream": True,
+        }
         headers = {"Authorization": f"Bearer {self.settings.xai_api_key}", "Content-Type": "application/json"}
         fragments: dict[int, dict[str, str]] = {}
         saw_done = False
         try:
             async with httpx.AsyncClient(timeout=60) as client:
                 async with client.stream("POST", f"{self.settings.xai_base_url}/chat/completions", json=payload, headers=headers) as response:
-                    if response.status_code in (401, 403): raise ProviderError("xAI authentication failed. Check the API key and model access.")
-                    if response.status_code == 429: raise ProviderError("xAI rate limit reached. Try again later.")
-                    if response.status_code >= 400: raise ProviderError(f"xAI request failed ({response.status_code}).")
+                    if response.status_code in (401, 403):
+                        raise ProviderError("xAI authentication failed. Check the API key and model access.")
+                    if response.status_code == 429:
+                        raise ProviderError("xAI rate limit reached. Try again later.")
+                    if response.status_code >= 400:
+                        raise ProviderError(f"xAI request failed ({response.status_code}).")
                     async for line in response.aiter_lines():
                         if line == "data: [DONE]":
-                            saw_done = True; continue
-                        if not line.startswith("data: "): continue
-                        try: data = json.loads(line[6:])
-                        except json.JSONDecodeError as exc: raise ProviderError("xAI returned malformed streaming JSON.") from exc
+                            saw_done = True
+                            continue
+                        if not line.startswith("data: "):
+                            continue
+                        try:
+                            data = json.loads(line[6:])
+                        except json.JSONDecodeError as exc:
+                            raise ProviderError("xAI returned malformed streaming JSON.") from exc
                         choice = data.get("choices", [{}])[0]
                         delta = choice.get("delta", {})
                         if content := delta.get("content"):
                             yield ProviderEvent("text", content=content)
                         for item in delta.get("tool_calls", []) or []:
                             index = item.get("index")
-                            if not isinstance(index, int): raise ProviderError("xAI returned an incomplete tool-call index.")
+                            if not isinstance(index, int):
+                                raise ProviderError("xAI returned an incomplete tool-call index.")
                             record = fragments.setdefault(index, {"id": "", "name": "", "arguments": ""})
                             record["id"] += item.get("id", "")
                             function = item.get("function", {})
@@ -126,8 +201,10 @@ class XAIProvider(ModelProvider):
                 for item in fragments.values():
                     if not item["id"] or not item["name"] or not item["arguments"]:
                         raise ProviderError("xAI stream ended with an incomplete tool call.")
-                    try: json.loads(item["arguments"])
-                    except json.JSONDecodeError as exc: raise ProviderError("xAI returned invalid tool-call arguments.") from exc
+                    try:
+                        json.loads(item["arguments"])
+                    except json.JSONDecodeError as exc:
+                        raise ProviderError("xAI returned invalid tool-call arguments.") from exc
                     calls.append(ToolCall(item["id"], item["name"], item["arguments"]))
                 yield ProviderEvent("tool_calls", tool_calls=tuple(calls))
             elif not saw_done:
@@ -137,4 +214,6 @@ class XAIProvider(ModelProvider):
 
 
 def build_provider(settings: Settings) -> ModelProvider:
-    return XAIProvider(settings) if settings.model_provider.lower() == "xai" else MockProvider()
+    if settings.model_provider.lower() == "xai":
+        return XAIProvider(settings)
+    return MockProvider(settings)

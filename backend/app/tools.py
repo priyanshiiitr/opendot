@@ -1,13 +1,18 @@
-"""The only local tools available to the agent in Milestone 2."""
+"""Registered tools available to the agent (local + browser)."""
+from __future__ import annotations
+
 import asyncio
 import json
 import math
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Literal
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
+if TYPE_CHECKING:
+    from .browser.session import BrowserService
 
 
 class ToolError(Exception):
@@ -88,7 +93,15 @@ async def demo_request_approval(arguments: DemoApprovalArguments) -> dict[str, A
 
 
 class ToolRegistry:
-    def __init__(self, default_timezone: str, timeout_seconds: float, max_argument_bytes: int, max_result_bytes: int):
+    def __init__(
+        self,
+        default_timezone: str,
+        timeout_seconds: float,
+        max_argument_bytes: int,
+        max_result_bytes: int,
+        browser: BrowserService | None = None,
+        browser_timeout_seconds: float = 30.0,
+    ):
         self.default_timezone = default_timezone
         self.max_argument_bytes = max_argument_bytes
         self.max_result_bytes = max_result_bytes
@@ -96,6 +109,10 @@ class ToolRegistry:
         self.register(ToolSpec("get_current_time", "Get the current system time in an IANA timezone.", TimeArguments, "read_only", timeout_seconds, get_current_time))
         self.register(ToolSpec("calculate", "Perform one basic arithmetic operation using two finite numbers.", CalculateArguments, "read_only", timeout_seconds, calculate))
         self.register(ToolSpec("demo_request_approval", "Run a harmless local demonstration action only after explicit user approval.", DemoApprovalArguments, "approval_required", timeout_seconds, demo_request_approval))
+        if browser is not None:
+            from .browser.tool_handlers import register_browser_tools
+
+            register_browser_tools(self, browser, browser_timeout_seconds)
 
     def register(self, tool: ToolSpec) -> None:
         if tool.name in self._tools:

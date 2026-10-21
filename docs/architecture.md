@@ -4,8 +4,10 @@
 User -> React/Electron -> FastAPI -> AgentRuntime -> ModelProvider
                                               |          |-> MockProvider
                                               |          |-> XAIProvider
-                                              |-> ToolRegistry -> calculate / get_current_time / demo_request_approval
+                                              |-> ToolRegistry -> local tools + browser_* tools
                                               |-> PermissionBroker -> allow | approval_required | deny
+                                              |-> BrowserService -> Playwright process + isolated context
+                                              |      |-> NavigationPolicy (scheme + DNS/IP + redirects)
                                               |-> SQLite (messages, agent_runs, execution_events)
 ```
 
@@ -13,29 +15,35 @@ User -> React/Electron -> FastAPI -> AgentRuntime -> ModelProvider
 
 1. The renderer POSTs the user message to `/api/conversations/{id}/messages`.
 2. FastAPI persists the user message and starts an `AgentRun`.
-3. `AgentRuntime` rebuilds provider history from SQLite (user, assistant, assistant tool-call records, tool results).
-4. The selected `ModelProvider.stream_turn(...)` either streams text tokens or emits structured `ToolCall` objects. Ordinary assistant text never becomes executable.
-5. For each structured call, the registry validates JSON size and Pydantic schemas, then the permission broker decides allow / pause / deny.
-6. Allowed tools execute under `asyncio.wait_for` with size limits. Results are stored as `role=tool` messages and `ExecutionEvent` rows.
-7. Approval-required tools create a waiting approval event and pause the run. Approve / Reject hits `/api/conversations/{id}/approvals/{approval_id}` and is a backend state transition.
-8. After tool results exist, the runtime calls the provider again until it produces final text, hits a configured limit, errors, cancels, or waits for approval.
-9. The UI consumes typed SSE events (`token`, `execution`, `approval_required`, `done`, `error`). Stream close without `done` or `approval_required` is treated as failure.
+3. `AgentRuntime` rebuilds provider history from SQLite.
+4. The provider streams text or structured `ToolCall` objects. Ordinary assistant text never executes.
+5. The registry validates arguments; the permission broker allows, pauses, or denies.
+6. Browser tools call `BrowserService`, which runs every navigation through `NavigationPolicy` before and after redirects.
+7. Results persist as tool messages and `ExecutionEvent` rows; the UI shows activity cards and approval controls.
+
+## Browser security (Milestone 3)
+
+See `docs/decisions/0004-browser-navigation-security.md` and `0005-playwright-isolated-context.md`.
+
+- **Process vs context:** Playwright launches a Chromium **process**; each session uses a fresh **context** with no imported cookies/passwords from the user’s Chrome profile.
+- **Destination policy:** only `http`/`https`; DNS-resolved IPs must be public; localhost/private/link-local/metadata blocked; redirects rechecked; fail closed.
+- **Fixture exception:** `AI_TEAMMATES_BROWSER_FIXTURE_MODE` + host/port — test-only, never default app mode.
+- **Untrusted pages:** snapshots/extracts include an explicit note; page text cannot approve tools or change policy. `browser_click` / `browser_type` stay `approval_required`.
 
 ## Why this shape
 
-- **Backend-owned loop:** The model proposes; the server authorizes and executes. That boundary is interview-critical for agent safety.
-- **Small explicit loop over an agent framework:** Easier to inspect, test, and explain. Frameworks can wrap this later if needed.
-- **Provider-neutral events:** `ProviderEvent` / `ToolCall` keep Mock and xAI behind one interface.
-- **SQLite traces:** `AgentRun` + `ExecutionEvent` reconstruct tool history after restart without inventing a second database.
+- **Backend-owned loop:** The model proposes; the server authorizes and executes.
+- **Small explicit loop over an agent framework:** Easier to inspect and teach.
+- **Playwright before computer-use:** Browser automation is easier to sandbox, test with fixtures, and explain in interviews than unrestricted OS mouse/keyboard control.
 
 ## Security and concurrency notes
 
 - Unknown tools and unclassified permissions fail closed.
 - The model cannot register tools, mutate permissions, or self-approve.
-- Tool argument and result byte limits reduce prompt-injection / data-exfiltration surface from tool payloads.
-- Cancellation marks the run; a cancelled waiting approval cannot later execute.
-- Tool handlers are async and timeout-bounded so they do not permanently block the event loop.
-- On Windows, IANA timezones require the `tzdata` package because the OS zone database is not always available to `zoneinfo`.
+- Tool argument/result byte limits apply; browser extracts have a separate size cap.
+- Cancellation marks the run; cancelled approvals cannot execute.
+- Browser actions are serialized with an asyncio lock and capped per session.
+- On Windows, `tzdata` is required for IANA timezones.
 
 ## SSE event types
 
@@ -44,6 +52,6 @@ User -> React/Electron -> FastAPI -> AgentRuntime -> ModelProvider
 | `run_started` | New `AgentRun` id |
 | `token` | Assistant text fragment |
 | `execution` | Persisted activity (`queued`, `validated`, `running`, `completed`, `failed`, `rejected`, `waiting_approval`) |
-| `approval_required` | Pause for user decision; UI shows Approve / Reject |
+| `approval_required` | Pause for user decision |
 | `done` | Turn completed successfully |
-| `error` | Controlled failure (limits, provider, invalid approval, cancel) |
+| `error` | Controlled failure |
