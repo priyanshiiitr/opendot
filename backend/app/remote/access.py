@@ -10,6 +10,7 @@ from ..database import DeviceSession
 from .service import RemoteAccessService
 
 PUBLIC_PREFIXES = (
+    "/api/internal/computers/",  # guest agent token auth (not device pairing)
     "/health",
     "/ready",
     "/docs",

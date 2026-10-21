@@ -11,5 +11,7 @@
 - [x] Milestone 8: multi-agent teams, bounded coordinator, dependency-aware subtasks
 - [x] Milestone 9: always-on service mode, device pairing, companion UI, diagnostics
 - [x] Milestone 10: ComputerProvider abstraction, mock + isolated_linux_dev, lifecycle/takeover/health/delete, billable stub (no paid VMs without approval)
+- [x] M10+ GCP path: `gcp_compute` + credit-funded gate + Fake client tests (live GCE VM pending owner credentials)
 - [ ] Milestone 4 (later): additional connectors (Gmail/GitHub/etc.) without rewriting the agent runtime
-- [ ] Future (requires owner approval + credentials): billable managed Linux desktop / VM behind the same ComputerProvider interface
+- [ ] Live verify: provision one credit-funded GCE VM + guest-agent preview after owner configures GCP trial/ADC
+- [ ] Future (separate approval): out-of-pocket / PAYG billable cloud (explicitly not authorized now)

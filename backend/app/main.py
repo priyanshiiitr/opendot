@@ -283,8 +283,11 @@ async def provision_computer(
     if not db.get(Teammate, teammate_id):
         raise HTTPException(404, "Teammate not found")
     provider = body.provider if body else None
+    confirm_estimate = bool(body.confirm_estimate) if body else False
     try:
-        return await computer_manager.provision(teammate_id, provider=provider)
+        return await computer_manager.provision(
+            teammate_id, provider=provider, confirm_estimate=confirm_estimate
+        )
     except ComputerError as exc:
         raise HTTPException(400, exc.reason) from exc
 
@@ -392,6 +395,53 @@ async def computer_preview(teammate_id: int, db: Session = Depends(get_db)) -> R
     except ComputerError as exc:
         raise HTTPException(400, exc.reason) from exc
     return Response(content=data, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+async def _gcp_computer_from_agent(computer_id: str, request: Request):
+    from .computers.gcp_compute import GcpComputeComputer
+
+    token = request.headers.get("X-Computer-Agent-Token") or ""
+    if not token:
+        raise HTTPException(401, "Missing agent token")
+    try:
+        live = await computer_manager.ensure_live(computer_id)
+    except ComputerError as exc:
+        raise HTTPException(404, exc.reason) from exc
+    if not isinstance(live, GcpComputeComputer):
+        raise HTTPException(400, "Computer is not a gcp_compute instance")
+    if not live.verify_agent_token(token):
+        raise HTTPException(403, "Invalid agent token")
+    return live
+
+
+@app.post("/api/internal/computers/{computer_id}/agent/heartbeat")
+async def agent_heartbeat(computer_id: str, request: Request) -> dict:
+    live = await _gcp_computer_from_agent(computer_id, request)
+    live.record_heartbeat()
+    return {"ok": True}
+
+
+@app.get("/api/internal/computers/{computer_id}/agent/commands")
+async def agent_commands(computer_id: str, request: Request) -> dict:
+    live = await _gcp_computer_from_agent(computer_id, request)
+    return {"commands": live.drain_commands()}
+
+
+@app.post("/api/internal/computers/{computer_id}/agent/preview")
+async def agent_preview_upload(computer_id: str, request: Request) -> dict:
+    import base64
+
+    live = await _gcp_computer_from_agent(computer_id, request)
+    body = await request.json()
+    png_b64 = body.get("png_b64") or ""
+    try:
+        data = base64.b64decode(png_b64)
+    except Exception as exc:
+        raise HTTPException(400, "Invalid png_b64") from exc
+    if len(data) > settings.computer_max_file_bytes:
+        raise HTTPException(400, "Preview too large")
+    live.store_preview_bytes(data)
+    return {"ok": True, "bytes": len(data)}
 
 
 @app.get("/api/teammates/{teammate_id}/workspace")

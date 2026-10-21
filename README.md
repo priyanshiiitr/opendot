@@ -55,24 +55,33 @@ Each teammate still has one stable computer ID. Providers:
 | `local_browser` (default) | Persistent Playwright profile on the host | Yes (M6+) |
 | `isolated_linux_dev` | Separate root + profile + isolation manifest (filesystem sandbox) | Yes (dev) |
 | `mock_cloud` | In-memory/fs mock for contract tests | Tests only |
-| `billable_cloud` | Stub — **refuses** provision without approval + credentials | Stub only |
+| `gcp_compute` | Real GCE VM (credit-funded gate; max 1 concurrent) | Code + Fake tests; **live VM needs your GCP setup** |
+| `billable_cloud` | Stub — **refuses** provision | Stub only |
 
-**Computer panel:** Provision local / Provision isolated Linux-dev → Health check → Start → Take over / Return control → Delete computer (`confirm=true` wipes workspace + profile).
+**Computer panel:** Provision local / isolated Linux-dev / **GCP (credit-funded)** → Health → Start → Take over → Delete (`confirm=true`).
 
 ```powershell
-# Optional defaults in backend\.env
+# Optional defaults in backend\.env — never put service-account JSON contents here
 AI_TEAMMATES_COMPUTER_DEFAULT_PROVIDER=local_browser
 AI_TEAMMATES_COMPUTER_ALLOW_BILLABLE=false
+AI_TEAMMATES_COMPUTER_CREDIT_FUNDED_ENABLED=false
+# After GCP free-trial setup (see docs/ops/gcp-control-plane.md):
+# AI_TEAMMATES_COMPUTER_CREDIT_FUNDED_ENABLED=true
+# AI_TEAMMATES_GCP_PROJECT_ID=...
+# AI_TEAMMATES_GCP_CONTROL_PLANE_URL=https://...
+# AI_TEAMMATES_GCP_CREDENTIALS_FILE=C:\secure\path\sa.json
 ```
 
 **Honest limits**
 
-- No paid cloud VM is created by this codebase path.
-- `isolated_linux_dev` is **not** a security-equivalent hypervisor VM.
-- Laptop-independent agent work still requires the **control plane** (uvicorn + worker) on an always-on host (M9) — a remote desktop alone is not enough.
-- Changing provider requires **Delete computer** first (no silent local→cloud migration).
+- Out-of-pocket spend is **not** authorized (`ALLOW_BILLABLE=false`).
+- Credit-funded mode stays off until you enable it after configuring credentials outside chat.
+- No live GCE VM is claimed until you complete the ops checklist and a lifecycle test passes.
+- `isolated_linux_dev` is **not** a hypervisor VM.
+- Laptop-independent work needs a remote **control plane** (see `docs/ops/gcp-control-plane.md`).
+- Changing provider requires **Delete computer** first.
 
-See ADR `docs/decisions/0012-cloud-computer-provider-abstraction.md`.
+See ADR `0012`, `0013`, and `docs/ops/gcp-control-plane.md`.
 
 ## Milestone 9 — Always-on service & companion
 

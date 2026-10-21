@@ -7,3 +7,6 @@ sqlalchemy>=2.0,<3
 tzdata>=2024.1
 uvicorn[standard]>=0.32,<1
 pytest>=8,<9
+# Optional until credit-funded GCP mode is enabled; FakeGcpComputeClient used in tests.
+google-cloud-compute>=1.19,<2
+google-auth>=2.29,<3

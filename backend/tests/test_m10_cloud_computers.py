@@ -158,7 +158,7 @@ def test_billable_provider_blocked_by_settings(m10_env):
         if row:
             db.delete(row)
             db.commit()
-    with pytest.raises(ComputerError, match="disabled|not auto-provisioned|Billable"):
+    with pytest.raises(ComputerError, match="billable_cloud refuses|disabled|not auto-provisioned|Billable"):
         asyncio.run(mgr.provision(tid, provider="billable_cloud"))
 
 

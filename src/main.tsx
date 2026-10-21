@@ -277,6 +277,33 @@ function ComputerPanel({
             </button>
             <button
               disabled={busy}
+              title="Credit-funded Google Compute Engine — estimate required before create"
+              onClick={() => {
+                void (async () => {
+                  setBusy(true)
+                  try {
+                    const estimate = await api.provisionComputer(teammate.id, 'gcp_compute', false)
+                    setStatus(estimate)
+                    const cost = estimate.estimated_cost
+                    const line = cost
+                      ? `~$${cost.usd_per_hour_approx}/hr for ${cost.machine_type} (estimate only; credits/trial required). Proceed to create at most one VM?`
+                      : 'Proceed to create a credit-funded GCP VM (max 1 concurrent)?'
+                    if (estimate.requires_confirmation && window.confirm(line)) {
+                      setStatus(await api.provisionComputer(teammate.id, 'gcp_compute', true))
+                    }
+                    await refresh()
+                  } catch (e) {
+                    onError(e instanceof Error ? e.message : 'GCP provision failed')
+                  } finally {
+                    setBusy(false)
+                  }
+                })()
+              }}
+            >
+              Provision GCP (credit-funded)
+            </button>
+            <button
+              disabled={busy}
               onClick={() =>
                 act(async () => {
                   const h = await api.computerHealth(teammate.id)

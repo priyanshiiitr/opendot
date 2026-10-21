@@ -153,10 +153,22 @@ export type ComputerStatus = {
   artifacts_path: string
   browser_open: boolean
   isolation_note?: string
-  limits?: { idle_stop_minutes?: number; max_runtime_minutes?: number; billable_allowed?: boolean }
+  limits?: {
+    idle_stop_minutes?: number
+    max_runtime_minutes?: number
+    billable_allowed?: boolean
+    credit_funded_enabled?: boolean
+    gcp_max_concurrent_vms?: number
+  }
   health?: { healthy?: boolean; note?: string; browser_process_alive?: boolean }
   message?: string | null
   deleted?: boolean
+  requires_confirmation?: boolean
+  estimated_cost?: {
+    machine_type?: string
+    usd_per_hour_approx?: number
+    notes?: string[]
+  }
 }
 
 export const api = {
@@ -168,11 +180,18 @@ export const api = {
       body: JSON.stringify({ name, description }),
     }),
   computer: (teammateId: number) => request<ComputerStatus>(`/api/teammates/${teammateId}/computer`),
-  provisionComputer: (teammateId: number, provider?: 'local_browser' | 'isolated_linux_dev') =>
+  provisionComputer: (
+    teammateId: number,
+    provider?: 'local_browser' | 'isolated_linux_dev' | 'gcp_compute',
+    confirmEstimate = false,
+  ) =>
     request<ComputerStatus>(`/api/teammates/${teammateId}/computer/provision`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(provider ? { provider } : {}),
+      body: JSON.stringify({
+        ...(provider ? { provider } : {}),
+        confirm_estimate: confirmEstimate,
+      }),
     }),
   computerHealth: (teammateId: number) =>
     request<ComputerStatus>(`/api/teammates/${teammateId}/computer/health`),

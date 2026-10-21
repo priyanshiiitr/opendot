@@ -20,6 +20,10 @@ from ..database import ComputerRecord, Teammate
 from .base import LIFECYCLE_STATES
 from .billable_stub import BillableCloudNotConfigured
 from .context import current_computer_id, current_teammate_id
+from .credit_policy import CreditPolicyError
+from .gcp_client import GcpClientError, GcpComputeClient
+from .gcp_compute import ISOLATION_NOTE as GCP_ISOLATION_NOTE
+from .gcp_compute import GcpComputeComputer
 from .isolated_linux import ISOLATION_NOTE as ISOLATED_LINUX_NOTE
 from .isolated_linux import IsolatedLinuxDevComputer
 from .paths import computer_layout, default_computers_root, ensure_layout
@@ -27,7 +31,7 @@ from .workspace import WorkspaceError, WorkspaceStore
 
 VALID_STATES = LIFECYCLE_STATES | frozenset({"error"})
 
-SUPPORTED_PROVIDERS = frozenset({"local_browser", "isolated_linux_dev", "billable_cloud"})
+SUPPORTED_PROVIDERS = frozenset({"local_browser", "isolated_linux_dev", "gcp_compute", "billable_cloud"})
 
 ISOLATION_NOTES = {
     "local_browser": (
@@ -35,6 +39,7 @@ ISOLATION_NOTES = {
         "Sessions may expire; re-authentication may be required."
     ),
     "isolated_linux_dev": ISOLATED_LINUX_NOTE,
+    "gcp_compute": GCP_ISOLATION_NOTE,
     "billable_cloud": (
         "Billable managed cloud — not configured. Explicit provider approval + credentials required."
     ),
@@ -187,31 +192,45 @@ class LocalBrowserComputer:
         return {k: str(v) for k, v in self.paths.items()}
 
 
-LiveComputer = LocalBrowserComputer | IsolatedLinuxDevComputer
+LiveComputer = LocalBrowserComputer | IsolatedLinuxDevComputer | GcpComputeComputer
 
 
 class ComputerManager:
-    def __init__(self, settings: Settings, session_factory: sessionmaker, policy: NavigationPolicy):
+    def __init__(
+        self,
+        settings: Settings,
+        session_factory: sessionmaker,
+        policy: NavigationPolicy,
+        *,
+        gcp_client: GcpComputeClient | None = None,
+    ):
         self.settings = settings
         self.session_factory = session_factory
         self.policy = policy
+        self.gcp_client = gcp_client
         self.root = default_computers_root(settings.computers_root_dir)
         self.root.mkdir(parents=True, exist_ok=True)
         self._live: dict[str, LiveComputer] = {}
         self._lock = asyncio.Lock()
         self._provision_locks: dict[int, asyncio.Lock] = {}
+        if settings.gcp_credentials_file:
+            # Path only — never log file contents.
+            import os
+
+            os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", settings.gcp_credentials_file)
 
     def _normalize_provider(self, provider: str | None) -> str:
         name = (provider or self.settings.computer_default_provider or "local_browser").strip()
         if name not in SUPPORTED_PROVIDERS:
             raise ComputerError(
                 f"Unsupported computer provider '{name}'. "
-                f"Supported: local_browser, isolated_linux_dev (billable_cloud requires approval)."
+                f"Supported: local_browser, isolated_linux_dev, gcp_compute "
+                f"(billable_cloud remains refused without separate approval)."
             )
-        if name == "billable_cloud" and not self.settings.computer_allow_billable:
+        if name == "billable_cloud":
             raise ComputerError(
-                "Billable cloud computers are disabled. Set AI_TEAMMATES_COMPUTER_ALLOW_BILLABLE=true "
-                "only after explicit approval, then configure a real provider adapter."
+                "billable_cloud refuses paid-resource creation. Use gcp_compute with "
+                "credit-funded mode for the free-trial demo, or keep local providers."
             )
         return name
 
@@ -219,6 +238,7 @@ class ComputerManager:
         return {
             "local_browser": "local_browser",
             "isolated_linux_dev": "filesystem_sandbox",
+            "gcp_compute": "vm",
             "billable_cloud": "managed_cloud",
         }.get(provider, "local_browser")
 
@@ -237,12 +257,6 @@ class ComputerManager:
                 )
             return row
         chosen = self._normalize_provider(provider)
-        if chosen == "billable_cloud":
-            raise ComputerError(
-                "Billable cloud computers are not auto-provisioned. "
-                "Choose a provider (see docs/decisions/0012), configure credentials outside chat, "
-                "and give explicit approval before any paid VM is created."
-            )
         computer_id = str(uuid.uuid4())
         paths = computer_layout(self.root, computer_id)
         ensure_layout(paths)
@@ -270,6 +284,13 @@ class ComputerManager:
     def _build_live(self, record: ComputerRecord) -> LiveComputer:
         if record.provider == "isolated_linux_dev":
             return IsolatedLinuxDevComputer(record, self.settings, self.policy)
+        if record.provider == "gcp_compute":
+            return GcpComputeComputer(
+                record,
+                self.settings,
+                client=self.gcp_client,
+                session_factory=self.session_factory,
+            )
         if record.provider == "billable_cloud":
             raise ComputerError("Billable cloud provider is not configured.")
         return LocalBrowserComputer(record, self.settings, self.policy)
@@ -377,8 +398,20 @@ class ComputerManager:
                 "idle_stop_minutes": self.settings.computer_idle_stop_minutes,
                 "max_runtime_minutes": self.settings.computer_max_runtime_minutes,
                 "billable_allowed": self.settings.computer_allow_billable,
+                "credit_funded_enabled": self.settings.computer_credit_funded_enabled,
+                "gcp_max_concurrent_vms": self.settings.gcp_max_concurrent_vms,
             },
         }
+
+    def live_by_id(self, computer_id: str) -> LiveComputer | None:
+        return self._live.get(computer_id)
+
+    async def ensure_live(self, computer_id: str) -> LiveComputer:
+        with self.session_factory() as db:
+            record = db.get(ComputerRecord, computer_id)
+            if not record:
+                raise ComputerError("Computer not found.")
+            return await self._live_for(record)
 
     def _set_state(self, db: Session, record: ComputerRecord, state: str, **fields: Any) -> ComputerRecord:
         if state not in VALID_STATES:
@@ -392,7 +425,13 @@ class ComputerManager:
         db.refresh(record)
         return record
 
-    async def provision(self, teammate_id: int, *, provider: str | None = None) -> dict[str, Any]:
+    async def provision(
+        self,
+        teammate_id: int,
+        *,
+        provider: str | None = None,
+        confirm_estimate: bool = False,
+    ) -> dict[str, Any]:
         """Idempotent provision: stable ID per teammate; never duplicates resources."""
         async with self._provision_lock_for(teammate_id):
             with self.session_factory() as db:
@@ -410,38 +449,67 @@ class ComputerManager:
                 record = self.get_or_create_record(db, teammate_id, provider=provider)
                 self._set_state(db, record, "provisioning", last_error=None)
                 computer_id = record.id
+                chosen_provider = record.provider
             try:
                 with self.session_factory() as db:
                     record = db.get(ComputerRecord, computer_id)
                     assert record is not None
                     live = await self._live_for(record)
-                    info = await live.provision()
-                    meta = {"last_provision": info, "updated_at": datetime.now(timezone.utc).isoformat()}
+                    if isinstance(live, GcpComputeComputer):
+                        info = await live.provision(confirm_estimate=confirm_estimate)
+                    else:
+                        info = await live.provision()
+                    if info.get("requires_confirmation"):
+                        self._set_state(
+                            db,
+                            record,
+                            "stopped",
+                            last_action="estimate_pending_confirmation",
+                            control_state="agent_control",
+                        )
+                        status = self.public_status(db, teammate_id, create=False)
+                        status["provision"] = info
+                        status["requires_confirmation"] = True
+                        status["estimated_cost"] = info.get("estimated_cost")
+                        status["message"] = info.get("message")
+                        return status
+                    # Merge provider meta carefully for GCP (already saved on live)
+                    if isinstance(live, GcpComputeComputer):
+                        meta_json = live.record.provider_meta_json
+                    else:
+                        meta_json = json.dumps(
+                            {"last_provision": info, "updated_at": datetime.now(timezone.utc).isoformat()}
+                        )
                     self._set_state(
                         db,
                         record,
                         "stopped",
                         last_action="provision",
                         isolation_tier=getattr(live, "isolation_tier", record.isolation_tier),
-                        provider_meta_json=json.dumps(meta),
+                        provider_meta_json=meta_json,
+                        external_ref=info.get("instance_name"),
                         control_state="agent_control",
                     )
-                    status = self.public_status(db, teammate_id)
+                    status = self.public_status(db, teammate_id, create=False)
                     status["provision"] = info
-                    status["idempotent"] = True
+                    status["idempotent"] = bool(info.get("idempotent"))
+                    status["estimated_cost"] = info.get("estimated_cost")
                     return status
-            except BillableCloudNotConfigured as exc:
+            except (BillableCloudNotConfigured, CreditPolicyError, GcpClientError) as exc:
+                reason = getattr(exc, "reason", str(exc))
                 with self.session_factory() as db:
                     record = db.get(ComputerRecord, computer_id)
                     if record:
-                        self._set_state(db, record, "failed", last_error=str(exc)[:300])
-                raise ComputerError(exc.reason) from exc
+                        self._set_state(db, record, "failed", last_error=reason[:300])
+                raise ComputerError(reason) from exc
             except Exception as exc:
                 with self.session_factory() as db:
                     record = db.get(ComputerRecord, computer_id)
                     if record:
                         self._set_state(db, record, "failed", last_error=str(exc)[:300])
                 raise ComputerError(f"Failed to provision computer: {exc}") from exc
+            finally:
+                _ = chosen_provider
 
     async def health(self, teammate_id: int) -> dict[str, Any]:
         with self.session_factory() as db:
@@ -449,6 +517,9 @@ class ComputerManager:
             if record is None:
                 raise ComputerError("Computer not found. Provision or start one for this teammate.")
             live = self._live.get(record.id)
+            if live is None and record.provider == "gcp_compute":
+                # Always probe the real/fake Compute API — filesystem presence is not VM health.
+                live = await self._live_for(record)
             if live is None:
                 # Cheap filesystem health without starting browser processes.
                 root = Path(record.root_path)
@@ -525,11 +596,27 @@ class ComputerManager:
     async def stop(self, teammate_id: int) -> dict[str, Any]:
         with self.session_factory() as db:
             record = self.get_or_create_record(db, teammate_id)
-            live = self._live.pop(record.id, None)
-            if live:
+            computer_id = record.id
+            provider = record.provider
+        live = self._live.pop(computer_id, None)
+        if live is None and provider == "gcp_compute":
+            with self.session_factory() as db:
+                record = db.get(ComputerRecord, computer_id)
+                assert record is not None
+                live = self._build_live(record)
+        if live is not None:
+            if isinstance(live, GcpComputeComputer):
+                try:
+                    await live.stop()
+                except GcpClientError as exc:
+                    raise ComputerError(exc.reason) from exc
+            else:
                 await live.close_browser()
+        with self.session_factory() as db:
+            record = db.get(ComputerRecord, computer_id)
+            assert record is not None
             self._set_state(db, record, "stopped", human_control=False, current_task=None)
-            return self.public_status(db, teammate_id)
+            return self.public_status(db, teammate_id, create=False)
 
     async def pause(self, teammate_id: int) -> dict[str, Any]:
         with self.session_factory() as db:
@@ -603,9 +690,12 @@ class ComputerManager:
         with self.session_factory() as db:
             record = self.get_or_create_record(db, teammate_id)
             live = await self._live_for(record)
-            if not live.browser.is_open:
+            if record.provider != "gcp_compute" and not live.browser.is_open:
                 raise ComputerError("Browser is not open. Start the computer first.")
-            data = await live.preview()
+            try:
+                data = await live.preview()
+            except GcpClientError as exc:
+                raise ComputerError(exc.reason) from exc
             record.preview_path = str(live.paths["preview"])
             db.commit()
             return data

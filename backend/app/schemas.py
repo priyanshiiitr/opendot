@@ -52,10 +52,13 @@ class ComputerStatusOut(BaseModel):
     detail: dict[str, Any] | None = None
     message: str | None = None
     computer_id: str | None = None
+    requires_confirmation: bool | None = None
+    estimated_cost: dict[str, Any] | None = None
 
 
 class ComputerProvisionRequest(BaseModel):
-    provider: Literal["local_browser", "isolated_linux_dev", "billable_cloud"] | None = None
+    provider: Literal["local_browser", "isolated_linux_dev", "gcp_compute", "billable_cloud"] | None = None
+    confirm_estimate: bool = False
 
 class MessageOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)

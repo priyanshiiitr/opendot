@@ -48,11 +48,23 @@ class Settings(BaseSettings):
     computer_preview_min_interval_ms: int = 1500
     computer_max_file_bytes: int = 256_000
     computer_headless_default: bool = True
-    # Milestone 10 — provider: local_browser | isolated_linux_dev (billable_cloud refused without approval)
+    # Milestone 10 — provider: local_browser | isolated_linux_dev | gcp_compute
     computer_default_provider: str = "local_browser"
+    # Paid out-of-pocket path — must stay false unless separately authorized.
     computer_allow_billable: bool = False
+    # Credit-funded GCP demo path (free trial / promotional credits). Separate from billable.
+    computer_credit_funded_enabled: bool = False
     computer_idle_stop_minutes: int = 30
     computer_max_runtime_minutes: int = 240
+    # Google Compute Engine (credentials via ADC or credentials file path — never commit secrets)
+    gcp_project_id: str = ""
+    gcp_zone: str = "us-central1-a"
+    gcp_machine_type: str = "e2-micro"
+    gcp_allowed_machine_types: str = "e2-micro,e2-small"
+    gcp_boot_disk_gb: int = 20
+    gcp_max_concurrent_vms: int = 1
+    gcp_control_plane_url: str = ""  # https://… always-on API the guest agent pulls from
+    gcp_credentials_file: str = ""  # optional path to SA JSON; prefer ADC / secret mount
     # Milestone 7 — memory / skills / workflows
     skills_root_dir: str = "./data/skills"
     memory_max_retrieve: int = 12
