@@ -23,8 +23,8 @@ Owner chose Google Cloud Compute Engine for the first real-cloud demo, using fre
 | Item | Status |
 |------|--------|
 | Fake client contract tests (provision/start/stop/delete/takeover/limits) | Verified in CI |
-| Real GCE VM create + lifecycle | **Blocked** until gcloud/ADC + project + credits configured by owner |
-| Browser preview from Chromium on VM | Placeholder guest agent PNG until desktop stack is installed on the image |
+| Real GCE VM create + lifecycle | **Verified** on project `ai-teamates` (`e2-micro`, us-central1-a): estimate → create → start → health RUNNING → stop TERMINATED → delete |
+| Browser preview from Chromium on VM | Placeholder guest agent PNG until desktop stack is installed; guest agent needs a reachable control-plane URL (not laptop localhost from the VM) |
 | Remote control-plane deploy | Documented procedure; not auto-deployed from this machine |
 
 ## Owner setup (required)
