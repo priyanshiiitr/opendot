@@ -95,6 +95,8 @@ class AgentRuntime:
             db.add(Message(conversation_id=conversation.id, role="tool", content=json.dumps({"tool_call_id": call.id, "result": {"error": str(exc)}}))); db.commit()
             yield self.public_event(failed); return
         requested.payload = json.dumps({"arguments": public_args}); db.commit()
+        validated = self._event(db, conversation.id, run.id, "tool_call", "validated", tool.name, call.id, {"arguments": public_args})
+        yield self.public_event(validated)
         decision = self.permissions.assess(tool)
         if decision.status == "approval_required":
             waiting = self._event(db, conversation.id, run.id, "approval", "waiting_approval", tool.name, call.id, {"arguments": public_args, "reason": decision.reason, "request_event_id": requested.id})

@@ -1,30 +1,28 @@
 # AI Teammates
 
-A local-first desktop AI teammate. Milestone 2 adds a bounded, backend-controlled agent loop with deterministic local tools, approvals, event streaming, and durable execution traces.
+A local-first desktop AI teammate. Milestone 1 delivers desktop chat with streaming and persistence. Milestone 2 adds a bounded, backend-controlled agent loop with deterministic local tools, approvals, execution events, and durable traces.
 
 ## Prerequisites
 
 - Windows 10/11
 - Node.js 20+ and npm
-- Python 3.11+ (the current workspace does not have Python installed)
+- Python 3.11+ (this workspace uses Python 3.14 with a project-local `.venv`)
 
 ## Setup
 
 ```powershell
 npm install
-py -3.11 -m venv .venv
+py -3.14 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r backend\requirements.txt
 Copy-Item backend\.env.example backend\.env
 ```
 
-If `py --version` reports `No installed Python found`, install Python 3.11+ from the official python.org Windows installer with “Add python.exe to PATH” enabled. This environment has no Python installation and no `winget`, so the installer step could not be performed here without user action.
-
-Keep `AI_TEAMMATES_MODEL_PROVIDER=mock` for offline development. To use xAI, set `AI_TEAMMATES_MODEL_PROVIDER=xai` and put the API key in `backend/.env`; it is read only by Python and never returned to the renderer.
+Keep `AI_TEAMMATES_MODEL_PROVIDER=mock` for offline development. To use xAI, set `AI_TEAMMATES_MODEL_PROVIDER=xai` and put the API key in `backend/.env`. The key is read only by Python and never returned to the renderer.
 
 ## Run
 
-In one terminal:
+Terminal 1 — backend:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
@@ -32,16 +30,16 @@ cd backend
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-In a second terminal from the project root:
+Terminal 2 — desktop UI:
 
 ```powershell
 Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
 npm run dev
 ```
 
-The Electron window opens after Vite starts. The backend health endpoint is `http://127.0.0.1:8000/health`.
+Health check: `http://127.0.0.1:8000/health`.
 
-If Electron was installed with `npm install --ignore-scripts`, repair it with a project-local cache and no administrator privileges:
+If Electron was installed with `npm install --ignore-scripts`, repair it with a project-local cache:
 
 ```powershell
 $env:npm_config_cache = "$PWD\.npm-cache"
@@ -53,29 +51,29 @@ npm rebuild electron
 
 ```powershell
 cd backend
-python -m pytest
+..\.venv\Scripts\python.exe -m pytest
 cd ..
 npm test
 npm run build
 ```
 
-The application intentionally does not implement computer control, shell execution, browser automation, connectors, or multi-agent delegation. Those belong to later milestones.
+Or, with the venv activated: `cd backend` then `python -m pytest`. `pytest.ini` adds the backend package root to `pythonpath`.
 
 ## Milestone 2: safe local agent loop
 
-In mock mode, try `add 12 plus 30`, `what time is it?`, or `request approval`. The first two execute registered local tools; the last shows a harmless simulated approval card. The backend validates JSON arguments, enforces four iterations and six calls per turn, and fails closed for unknown tools. Mock mode is offline; xAI tool calling is unit-tested with mocked SSE chunks but needs a real compatible xAI account for live verification.
+In mock mode, try:
 
-## Verification status
+- `add 12 plus 30` — structured `calculate` tool call, real arithmetic, final answer uses the tool result
+- `what time is it?` — `get_current_time` with timezone `Asia/Calcutta` by default
+- `request approval` — `demo_request_approval` pauses for Approve / Reject; rejection never executes
 
-- Frontend unit test: passed (`npm test`).
-- Production frontend build: passed (`npm run build`).
-- Electron package repair: passed; `node_modules\electron\dist\electron.exe` exists and reports a version.
-- Backend tests: passed (`python -m pytest`): 2 tests passed.
-- Backend health endpoint, SQLite persistence, mock-provider SSE stream, and restart persistence: verified against a running loopback Uvicorn server.
-- Desktop launch: verified in an actual Electron window. A message sent through the composer streamed a mock response, and the conversation remained after the app restart.
-- Backend-unavailable UI: verified. Reloading the desktop application without the local backend displayed `Failed to fetch`; restoring the backend and reloading recovered the conversation.
+The backend validates JSON arguments with Pydantic, enforces iteration and tool-call limits, times out tool handlers, and fails closed for unknown tools. Mock mode is offline. xAI tool-call streaming is unit-tested with mocked SSE chunks; live xAI verification still needs a compatible account and model access.
 
-### Environment note
+## What this app intentionally does not do yet
+
+No computer control, shell execution, browser automation, Telegram/Gmail/GitHub connectors, or multi-agent delegation. Those are later milestones.
+
+## Environment note
 
 If Electron starts as Node and `app` is undefined, remove `ELECTRON_RUN_AS_NODE` for that launch only:
 

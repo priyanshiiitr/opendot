@@ -19,7 +19,9 @@ app = FastAPI(title=settings.app_name, version="0.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=settings.allowed_origins, allow_methods=["*"], allow_headers=["*"])
 
 @app.on_event("startup")
-def startup() -> None: init_db()
+def startup() -> None:
+    init_db()
+
 
 def conversation_out(conversation: Conversation) -> ConversationDetail:
     return ConversationDetail(
@@ -60,18 +62,18 @@ def get_conversation(conversation_id: int, db: Session = Depends(get_db)) -> Con
 @app.post("/api/conversations/{conversation_id}/messages")
 async def send_message(conversation_id: int, request: ChatRequest, db: Session = Depends(get_db)) -> StreamingResponse:
     conversation = db.get(Conversation, conversation_id)
-    if not conversation: raise HTTPException(404, "Conversation not found")
-    db.add(Message(conversation_id=conversation.id, role="user", content=request.content)); db.commit()
+    if not conversation:
+        raise HTTPException(404, "Conversation not found")
+    db.add(Message(conversation_id=conversation.id, role="user", content=request.content))
+    db.commit()
     run = runtime.start_run(db, conversation.id)
+
     async def events() -> AsyncIterator[dict]:
         yield {"type": "run_started", "run_id": run.id}
+        # AgentRuntime owns persistence for assistant text, tool calls, tool results, and approvals.
         async for event in runtime.run(db, conversation, build_provider(settings), run):
-            if event.get("type") == "token":
-                # Persist only the complete answer after the turn is finished below.
-                yield event
-            else: yield event
-        # The runtime has already persisted tool material. Persist assistant text reconstructed from the stream client-side only if final text exists.
-        # A fresh provider stream is intentionally not repeated here.
+            yield event
+
     return sse(events())
 
 @app.post("/api/conversations/{conversation_id}/approvals/{approval_id}")

@@ -1,14 +1,15 @@
 import json
-import os
-os.environ["AI_TEAMMATES_DATABASE_URL"] = "sqlite:///./test_ai_teammates.db"
-os.environ["AI_TEAMMATES_MODEL_PROVIDER"] = "mock"
+
 from fastapi.testclient import TestClient
+
 from app.main import app
+
 
 def test_health_and_default_teammate():
     with TestClient(app) as client:
         assert client.get("/health").json()["status"] == "ok"
         assert client.get("/api/teammates").json()[0]["name"] == "Atlas"
+
 
 def test_conversation_persists_mock_response():
     with TestClient(app) as client:
