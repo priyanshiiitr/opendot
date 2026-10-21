@@ -1,6 +1,6 @@
 # Interview guide
 
-Use these answers only for features that exist in this repository. Do not claim browser control, connectors, or multi-agent orchestration yet.
+Use these answers only for features that exist in this repository. Do not claim cloud hosting, always-on execution while the PC is off, or multi-agent delegation.
 
 1. **How does an LLM tool loop work?**
    The provider emits a structured call; the backend validates, authorizes, executes, persists the result, and gives that actual result back to the provider for final text.
@@ -36,7 +36,7 @@ Use these answers only for features that exist in this repository. Do not claim 
     Assert tool selection, argument validity, permission outcomes, result grounding in the final answer, limit behavior, and persistence after restart. Separate offline mock tests from rare live provider smoke tests.
 
 12. **How would production reliability improve from here?**
-    Add formal DB migrations, worker isolation for long tools, durable cancellation across processes, idempotency keys for approvals, structured tracing, and metrics on tool success/latency.
+    Adopt full Alembic for multi-host deploys, isolate long browser jobs, add structured tracing/metrics, and optionally move the worker to a separate process while keeping the same run schema.
 
 13. **How would computer-use tools be made safe later?**
     Separate least-privilege adapters, observation-first mode, strict allowlists, explicit approval, screenshot/audit trails, and never let the model escalate its own permissions.
@@ -61,3 +61,33 @@ Use these answers only for features that exist in this repository. Do not claim 
 
 20. **Why is a test-only fixture exception required?**
     Automated tests need local HTML without hitting the public internet, but normal app mode must not browse arbitrary local/private services. The exception is host+port scoped and disabled by default.
+
+21. **How do connectors relate to the agent loop?**
+    Connectors verify credentials and register tools into the existing ToolRegistry. The model never sees tokens. Authorization still goes through PermissionBroker and approvals.
+
+22. **Why Bot API instead of a personal Telegram session?**
+    Official bots are supported, auditable, and do not require scraping or stealing user sessions. They cannot read an unrestricted personal inbox—document that limit honestly.
+
+23. **Where should API tokens live?**
+    OS secure storage (Windows Credential Manager via keyring). Not SQLite chat history, not frontend state after save, not logs, not git.
+
+24. **How do you stop Telegram prompt injection?**
+    Treat message text as untrusted evidence, filter by chat allowlist, and keep permission decisions in backend code the message cannot call.
+
+25. **How do durable background agent jobs work here?**
+    An `AutomationRun` row is queued in SQLite. A FastAPI lifespan worker claims it with a conditional update, opens a dedicated conversation, and drives the same `AgentRuntime` used by chat. Progress and checkpoints are committed; the UI can disconnect.
+
+26. **How do you prevent duplicate scheduled runs?**
+    Each due occurrence has a unique `occurrence_key` (`automation_id` + due timestamp). Scheduler ticks and restarts that try to enqueue the same key hit a uniqueness constraint and no-op.
+
+27. **What happens if the process crashes mid-Telegram-send?**
+    Checkpoints mark consequential in-flight tools as uncertain. On boot the run becomes `needs_reconciliation` so we do not blindly resend. Safe interrupted work is marked `interrupted` for explicit retry.
+
+28. **How do approvals survive restart?**
+    `waiting_approval` is persisted with the exact argument payload. Reconcile leaves those rows waiting; only an explicit user decision resumes via `resolve_approval`.
+
+29. **Why not Celery/Redis for a desktop agent?**
+    Single-user local SQLite already gives durability and a claim primitive. Extra brokers add ops cost without matching the threat/scale model.
+
+30. **How are webhooks kept safe?**
+    Dedicated `/hooks/{id}` route, bearer secret stored as a hash, body size and rate limits, event-id dedupe, loopback bind, enqueue-only — never expose the general agent API to the public internet.

@@ -1,15 +1,17 @@
 # Architecture
 
 ```text
-User -> React/Electron -> FastAPI -> AgentRuntime -> ModelProvider
-                                              |          |-> MockProvider
-                                              |          |-> XAIProvider
-                                              |-> ToolRegistry -> local tools + browser_* tools
-                                              |-> PermissionBroker -> allow | approval_required | deny
-                                              |-> BrowserService -> Playwright process + isolated context
-                                              |      |-> NavigationPolicy (scheme + DNS/IP + redirects)
-                                              |-> SQLite (messages, agent_runs, execution_events)
+User -> React/Electron -> FastAPI
+                            |-> AgentRuntime (chat SSE or automation worker)
+                            |      |-> MockProvider / GroqProvider / XAIProvider
+                            |      |-> ToolRegistry + PermissionBroker
+                            |-> AutomationWorker (lifespan) -> claim AutomationRun -> AgentRuntime
+                            |-> Scheduler tick -> enqueue due automations (occurrence_key)
+                            |-> /hooks/{id} webhook receiver (bearer, hashed secret)
+                            |-> BrowserService / ConnectorManager / SQLite
 ```
+
+See ADR `0007-durable-automations-sqlite-worker.md`.
 
 ## Request path for a tool-using turn
 
@@ -44,6 +46,20 @@ See `docs/decisions/0004-browser-navigation-security.md` and `0005-playwright-is
 - Cancellation marks the run; cancelled approvals cannot execute.
 - Browser actions are serialized with an asyncio lock and capped per session.
 - On Windows, `tzdata` is required for IANA timezones.
+- Telegram tokens live in OS keyring only; connector SQLite rows hold allowlists/metadata. Sends require approval with exact chat/text binding. Incoming Telegram text is untrusted evidence (ADR 0006).
+
+## Automations (Milestone 5)
+
+| Concept | Role |
+| --- | --- |
+| `Automation` | Definition: instruction, schedule, timezone, limits, autonomy policy |
+| `AutomationRun` | One durable execution: `queued` → `running` → terminal / `waiting_approval` |
+| Worker | Claims with `UPDATE … WHERE status='queued'`; not an untracked task |
+| Checkpoint | Last safe step; consequential tools may force `needs_reconciliation` |
+| Occurrence key | Unique scheduled fire identity — ticks/restarts cannot double-enqueue |
+| Webhook | `/hooks/{id}` separate from `/api`; enqueue only, never full sync agent loop |
+
+**Local-only truth:** schedules and webhooks process only while the backend is running. Missed runs follow `skip_catch_up` by default (no flood after multi-day offline).
 
 ## SSE event types
 

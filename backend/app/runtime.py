@@ -99,8 +99,38 @@ class AgentRuntime:
         yield self.public_event(validated)
         decision = self.permissions.assess(tool)
         if decision.status == "approval_required":
-            waiting = self._event(db, conversation.id, run.id, "approval", "waiting_approval", tool.name, call.id, {"arguments": public_args, "reason": decision.reason, "request_event_id": requested.id})
-            yield {"type": "approval_required", "approval_id": waiting.id, "run_id": run.id, "tool_name": tool.name, "arguments": public_args, "reason": decision.reason}; return
+            approval_payload = {
+                "arguments": public_args,
+                "reason": decision.reason,
+                "request_event_id": requested.id,
+                "operation": tool.name,
+            }
+            if tool.name == "telegram_send_message":
+                approval_payload["summary"] = {
+                    "destination_chat_id": public_args.get("chat_id"),
+                    "message_text": public_args.get("text"),
+                    "note": "Approving sends exactly this text to this chat_id via the connected Telegram bot.",
+                }
+            waiting = self._event(
+                db,
+                conversation.id,
+                run.id,
+                "approval",
+                "waiting_approval",
+                tool.name,
+                call.id,
+                approval_payload,
+            )
+            yield {
+                "type": "approval_required",
+                "approval_id": waiting.id,
+                "run_id": run.id,
+                "tool_name": tool.name,
+                "arguments": public_args,
+                "reason": decision.reason,
+                "summary": approval_payload.get("summary"),
+            }
+            return
         if decision.status != "allowed":
             failed = self._event(db, conversation.id, run.id, "tool_result", "failed", tool.name, call.id, {"error": decision.reason})
             db.add(Message(conversation_id=conversation.id, role="tool", content=json.dumps({"tool_call_id": call.id, "result": {"error": decision.reason}}))); db.commit()
@@ -132,17 +162,31 @@ class AgentRuntime:
         if decision == "rejected":
             approval.status = "rejected"; run.status = "completed"; db.commit()
             rejected = self._event(db, conversation.id, run.id, "tool_result", "rejected", approval.tool_name, approval.tool_call_id, {"error": "User rejected the approval request."})
-            db.add(Message(conversation_id=conversation.id, role="tool", content=json.dumps({"tool_call_id": approval.tool_call_id, "result": {"error": "User rejected the approval request."}}))); db.add(Message(conversation_id=conversation.id, role="assistant", content="I did not run the simulated action because you rejected it.")); db.commit()
-            yield self.public_event(rejected); yield {"type": "token", "content": "I did not run the simulated action because you rejected it."}; yield {"type": "done", "run_id": run.id}; return
+            reject_text = "I did not run the approved operation because you rejected it."
+            db.add(Message(conversation_id=conversation.id, role="tool", content=json.dumps({"tool_call_id": approval.tool_call_id, "result": {"error": "User rejected the approval request."}})))
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=reject_text))
+            db.commit()
+            yield self.public_event(rejected)
+            yield {"type": "token", "content": reject_text}
+            yield {"type": "done", "run_id": run.id}
+            return
         approval.status = "approved"; run.status = "running"; db.commit()
         payload = json.loads(approval.payload)
+        approved_args = payload.get("arguments")
+        if not isinstance(approved_args, dict):
+            yield {"type": "error", "message": "Approval payload is missing the exact approved arguments."}; return
         try:
-            tool, arguments, public_args = self.registry.validate(approval.tool_name or "", json.dumps(payload["arguments"]))
+            # Execute only the exact argument object captured at approval time.
+            tool, arguments, public_args = self.registry.validate(approval.tool_name or "", json.dumps(approved_args, ensure_ascii=False))
         except ToolError as exc:
             yield {"type": "error", "message": str(exc)}; return
-        call = ToolCall(approval.tool_call_id or "", approval.tool_name or "", json.dumps(payload["arguments"]))
-        async for item in self._execute_validated(db, conversation, run, call, tool, arguments, public_args): yield item
-        async for item in self.run(db, conversation, provider, run): yield item
+        if public_args != approved_args:
+            yield {"type": "error", "message": "Approved arguments no longer match the pending operation. Request approval again."}; return
+        call = ToolCall(approval.tool_call_id or "", approval.tool_name or "", json.dumps(approved_args, ensure_ascii=False))
+        async for item in self._execute_validated(db, conversation, run, call, tool, arguments, public_args):
+            yield item
+        async for item in self.run(db, conversation, provider, run):
+            yield item
 
     def cancel(self, db: Session, run_id: str) -> bool:
         run = db.get(AgentRun, run_id)

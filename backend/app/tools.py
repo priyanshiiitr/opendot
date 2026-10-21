@@ -119,11 +119,22 @@ class ToolRegistry:
             raise ValueError(f"Tool already registered: {tool.name}")
         self._tools[tool.name] = tool
 
+    def unregister(self, name: str) -> None:
+        self._tools.pop(name, None)
+
+    def unregister_matching(self, predicate) -> None:
+        for name in list(self._tools):
+            if predicate(name):
+                self._tools.pop(name, None)
+
     def get(self, name: str) -> ToolSpec:
         tool = self._tools.get(name)
         if tool is None:
             raise ToolError(f"Unknown tool: {name}")
         return tool
+
+    def has(self, name: str) -> bool:
+        return name in self._tools
 
     def schemas(self) -> list[dict[str, Any]]:
         return [tool.openai_schema() for tool in self._tools.values()]

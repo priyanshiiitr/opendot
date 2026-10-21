@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     xai_api_key: str | None = None
     xai_model: str = "grok-4.6"
     xai_base_url: str = "https://api.x.ai/v1"
+    # Groq Cloud (console.groq.com) — free tier available; OpenAI-compatible API.
+    groq_api_key: str | None = None
+    groq_model: str = "openai/gpt-oss-20b"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
     cors_origins: str = "http://localhost:5173"
     agent_max_iterations: int = 6
     agent_max_tool_calls: int = 12
@@ -29,6 +33,15 @@ class Settings(BaseSettings):
     browser_fixture_host: str = "127.0.0.1"
     browser_fixture_port: int = 0
     browser_fixture_base_url: str = ""
+    # Milestone 5 — durable automations (local SQLite queue + lifespan worker).
+    automation_worker_enabled: bool = True
+    automation_worker_poll_seconds: float = 1.0
+    automation_scheduler_tick_seconds: float = 15.0
+    automation_max_queued: int = 50
+    automation_lease_seconds: float = 120.0
+    automation_default_timezone: str = "Asia/Calcutta"
+    webhook_max_body_bytes: int = 65_536
+    webhook_rate_limit_per_minute: int = 30
     model_config = SettingsConfigDict(env_file=".env", env_prefix="AI_TEAMMATES_", extra="ignore")
 
     @property

@@ -1,12 +1,12 @@
 # AI Teammates
 
-A local-first desktop AI teammate. Milestone 2 adds a bounded agent loop with local tools and approvals. Milestone 3 adds **Playwright browser tools** with fail-closed navigation policy and isolated browser contexts.
+Local-first desktop AI teammate with a bounded agent loop, Playwright browser tools, a **Telegram Bot API connector**, and a **durable Automations** worker (Milestone 5).
 
 ## Prerequisites
 
 - Windows 10/11
 - Node.js 20+ and npm
-- Python 3.11+ (this workspace uses Python 3.14 with a project-local `.venv`)
+- Python 3.11+ (this workspace uses Python 3.14 with `.venv`)
 
 ## Setup
 
@@ -19,28 +19,22 @@ python -m playwright install chromium
 Copy-Item backend\.env.example backend\.env
 ```
 
-Keep `AI_TEAMMATES_MODEL_PROVIDER=mock` for offline development. Keep `AI_TEAMMATES_BROWSER_FIXTURE_MODE=false` in normal use — fixture mode is **test-only**.
+Providers: `mock` (offline), `groq` (free-tier Groq Cloud keys from console.groq.com), or `xai`.
 
-To use xAI, set `AI_TEAMMATES_MODEL_PROVIDER=xai` and put the API key in `backend/.env`. The key is read only by Python and never returned to the renderer.
+Telegram bot tokens are entered only in the **Connections** UI and stored in **Windows Credential Manager** via `keyring`. Never put bot tokens in chat, git, or `.env`.
 
 ## Run
 
-Terminal 1 — backend:
-
 ```powershell
+# Terminal 1 — backend must stay up for schedules/webhooks
 .\.venv\Scripts\Activate.ps1
 cd backend
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
 
-Terminal 2 — desktop UI:
-
-```powershell
+# Terminal 2
 Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
 npm run dev
 ```
-
-Health check: `http://127.0.0.1:8000/health`.
 
 ## Verify
 
@@ -52,34 +46,39 @@ npm test
 npm run build
 ```
 
-## Milestone 2 prompts (still work)
+## Milestone 5 — Automations
 
-- `add 12 plus 30`
-- `what time is it?`
-- `request approval`
+Open **Automations** in the sidebar.
 
-## Milestone 3: browser teammate (fixture / mock)
+- Create an automation with an instruction (uses the real `AgentRuntime` + tools).
+- **Run now** queues a durable job; you can leave chat — the lifespan worker continues.
+- Schedules: daily / weekdays / interval (timezone `Asia/Calcutta` by default).
+- Approvals pause the run as `waiting_approval` and survive restart.
+- Webhooks: create a hook, store the one-time bearer secret, `POST http://127.0.0.1:8000/hooks/{id}`.
+- Receipts show verified tool events, not just model claims.
 
-Browser tools are registered in the same `ToolRegistry`. Navigation allows only `http`/`https`, validates DNS/IPs, blocks private/loopback/metadata destinations, and rechecks after redirects. Playwright uses a fresh isolated **browser context** (not your everyday Chrome profile).
+**Honest limits:** if the PC or backend is off, jobs wait until restart (missed-run policy skips catch-up floods). This is not a cloud always-on service.
 
-Automated tests serve HTML under `backend/tests/fixtures/browser/` with an explicit fixture-mode exception. In normal app mode that exception is off, so local/private destinations fail closed.
+### Demo (scheduled + recovery)
 
-Mock scenarios (require fixture server + fixture settings used by tests):
+1. Create automation: instruction `add 2 and 3`, schedule daily 09:00, or use **Run now**.
+2. Confirm run history shows `completed` and the assistant text mentions `5`.
+3. Pause the automation — scheduler must not enqueue.
+4. For recovery: a run interrupted mid-consequential tool is marked `needs_reconciliation` (see tests / ADR 0007).
 
-- `research startups` → `browser_open` → `browser_extract` → grounded shortlist
-- `prompt injection page` → snapshot treated as untrusted; refuses to follow page instructions
+## Milestone 4 — Telegram Bot
 
-`browser_click` and `browser_type` require user approval via the existing approval UI.
+1. BotFather → token → Connections → Save & verify.
+2. Allowlist your chat id; sends require **Approve send**.
 
-## What this app intentionally does not do yet
+## Earlier milestones
 
-No OS-level computer use, unrestricted web crawling in CI, Telegram/Gmail/GitHub connectors, or multi-agent delegation.
+- M2: `add 12 plus 30`, `request approval`
+- M3: fixture browser research (tests); public browsing uses fail-closed URL policy
 
-## Environment note
+## Docs
 
-If Electron starts as Node and `app` is undefined:
-
-```powershell
-Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
-npm run dev
-```
+- `docs/architecture.md`
+- `docs/roadmap.md`
+- `docs/decisions/0007-durable-automations-sqlite-worker.md`
+- `docs/interview_guide.md`
