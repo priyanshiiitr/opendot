@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from ..computers.context import current_teammate_id
 from ..tools import ToolError, ToolRegistry, ToolSpec
 from .policy import NavigationDenied
 from .session import BrowserService, BrowserServiceError
@@ -49,7 +51,7 @@ class BrowserScreenshotArguments(BaseModel):
 
 
 class BrowserCloseArguments(BaseModel):
-    """No parameters; closes the isolated session."""
+    """No parameters; closes the isolated session (profile preserved for persistent computers)."""
 
 
 def _map_error(exc: Exception) -> ToolError:
@@ -62,53 +64,72 @@ def _map_error(exc: Exception) -> ToolError:
     return ToolError("Browser tool failed.")
 
 
-def register_browser_tools(registry: ToolRegistry, browser: BrowserService, timeout_seconds: float) -> None:
+def register_browser_tools(
+    registry: ToolRegistry,
+    browser: BrowserService | None = None,
+    timeout_seconds: float = 30.0,
+    *,
+    resolve_browser: Callable[[], Awaitable[BrowserService]] | None = None,
+) -> None:
+    """Register browser tools.
+
+    Pass either a fixed ``browser`` (tests / fixture) or ``resolve_browser`` that
+    returns the current teammate's computer session (production).
+    """
+
+    async def _browser() -> BrowserService:
+        if resolve_browser is not None:
+            return await resolve_browser()
+        if browser is None:
+            raise ToolError("Browser tools are not configured.")
+        return browser
+
     async def browser_open(arguments: BrowserOpenArguments) -> dict[str, Any]:
         try:
-            return await browser.open(arguments.url)
+            return await (await _browser()).open(arguments.url)
         except Exception as exc:
             raise _map_error(exc) from exc
 
     async def browser_snapshot(_arguments: BrowserSnapshotArguments) -> dict[str, Any]:
         try:
-            return await browser.snapshot()
+            return await (await _browser()).snapshot()
         except Exception as exc:
             raise _map_error(exc) from exc
 
     async def browser_extract(arguments: BrowserExtractArguments) -> dict[str, Any]:
         try:
-            return await browser.extract(arguments.selectors)
+            return await (await _browser()).extract(arguments.selectors)
         except Exception as exc:
             raise _map_error(exc) from exc
 
     async def browser_click(arguments: BrowserClickArguments) -> dict[str, Any]:
         try:
-            return await browser.click(arguments.selector)
+            return await (await _browser()).click(arguments.selector)
         except Exception as exc:
             raise _map_error(exc) from exc
 
     async def browser_type(arguments: BrowserTypeArguments) -> dict[str, Any]:
         try:
-            return await browser.type_text(arguments.selector, arguments.text)
+            return await (await _browser()).type_text(arguments.selector, arguments.text)
         except Exception as exc:
             raise _map_error(exc) from exc
 
     async def browser_screenshot(arguments: BrowserScreenshotArguments) -> dict[str, Any]:
         try:
-            return await browser.screenshot(arguments.name)
+            return await (await _browser()).screenshot(arguments.name)
         except Exception as exc:
             raise _map_error(exc) from exc
 
     async def browser_close(_arguments: BrowserCloseArguments) -> dict[str, Any]:
         try:
-            return await browser.close()
+            return await (await _browser()).close()
         except Exception as exc:
             raise _map_error(exc) from exc
 
     registry.register(
         ToolSpec(
             "browser_open",
-            "Open or navigate the isolated browser session to an http(s) URL after destination policy checks.",
+            "Open or navigate this teammate's isolated browser to an http(s) URL after destination policy checks.",
             BrowserOpenArguments,
             "read_only",
             timeout_seconds,
@@ -158,7 +179,7 @@ def register_browser_tools(registry: ToolRegistry, browser: BrowserService, time
     registry.register(
         ToolSpec(
             "browser_screenshot",
-            "Capture a screenshot of the current page into the local artifacts directory.",
+            "Capture a screenshot of the current page into this teammate's artifacts directory.",
             BrowserScreenshotArguments,
             "read_only",
             timeout_seconds,
@@ -168,10 +189,20 @@ def register_browser_tools(registry: ToolRegistry, browser: BrowserService, time
     registry.register(
         ToolSpec(
             "browser_close",
-            "Close the isolated browser session and clear its temporary storage.",
+            "Close the browser process for this teammate. Persistent profile data is kept unless cleared explicitly.",
             BrowserCloseArguments,
             "read_only",
             timeout_seconds,
             browser_close,
         )
     )
+
+
+def resolve_teammate_browser(computers: Any) -> Callable[[], Awaitable[BrowserService]]:
+    async def _resolve() -> BrowserService:
+        tid = current_teammate_id.get()
+        if tid is None:
+            raise ToolError("No teammate computer context. Browser tools require an active teammate run.")
+        return await computers.session_for_teammate(tid)
+
+    return _resolve

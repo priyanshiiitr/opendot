@@ -5,16 +5,69 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from .computers.context import current_computer_id, current_teammate_id
 from .config import Settings
 from .database import AgentRun, Conversation, ExecutionEvent, Message
-from .permissions import PermissionBroker
+from .permissions import PermissionBroker, load_auth_context
 from .providers import ModelProvider, ProviderError, ToolCall
 from .tools import ToolError, ToolRegistry
 
 
 class AgentRuntime:
-    def __init__(self, settings: Settings, registry: ToolRegistry, permissions: PermissionBroker):
+    def __init__(
+        self,
+        settings: Settings,
+        registry: ToolRegistry,
+        permissions: PermissionBroker,
+        computer_manager=None,
+        memory_service=None,
+    ):
         self.settings, self.registry, self.permissions = settings, registry, permissions
+        self.computer_manager = computer_manager
+        self.memory_service = memory_service
+        self._skill_categories: list[str] | None = None
+        self._last_memory_ids: list[str] = []
+
+    def set_skill_categories(self, categories: list[str] | None) -> None:
+        self._skill_categories = categories
+
+    def _system_prompt(self, db: Session, conversation: Conversation, user_query: str = "") -> str:
+        base = conversation.teammate.system_prompt
+        if self.memory_service is None:
+            return base
+        rows = self.memory_service.retrieve_for_task(
+            db, teammate_id=conversation.teammate_id, query=user_query
+        )
+        block, ids = self.memory_service.format_for_prompt(rows)
+        self._last_memory_ids = ids
+        if not block:
+            return base
+        return f"{base}\n\n{block}"
+
+    def _bind_computer(self, conversation: Conversation):
+        if self.computer_manager is None:
+            return None
+        if current_teammate_id.get() is not None:
+            return None  # already bound by an outer call (e.g. approval resume → run)
+        teammate_id = conversation.teammate_id
+        from .database import SessionLocal
+
+        with SessionLocal() as db:
+            record = self.computer_manager.get_or_create_record(db, teammate_id)
+            computer_id = record.id
+        t = current_teammate_id.set(teammate_id)
+        c = current_computer_id.set(computer_id)
+        self.computer_manager.mark_busy(teammate_id, f"conversation:{conversation.id}")
+        return (t, c, teammate_id)
+
+    def _unbind_computer(self, tokens) -> None:
+        if not tokens:
+            return
+        t, c, teammate_id = tokens
+        current_teammate_id.reset(t)
+        current_computer_id.reset(c)
+        if self.computer_manager is not None:
+            self.computer_manager.mark_ready(teammate_id)
 
     def start_run(self, db: Session, conversation_id: int) -> AgentRun:
         run = AgentRun(id=str(uuid.uuid4()), conversation_id=conversation_id, status="running")
@@ -46,44 +99,51 @@ class AgentRuntime:
         return run is None or run.cancelled
 
     async def run(self, db: Session, conversation: Conversation, provider: ModelProvider, run: AgentRun) -> AsyncIterator[dict[str, Any]]:
-        calls_used = 0
-        for iteration in range(self.settings.agent_max_iterations):
-            if self._cancelled(db, run.id):
-                run.status = "cancelled"; db.commit()
-                yield {"type": "error", "message": "Task cancelled before further tool execution."}; return
-            yielded_text = False
-            text_chunks: list[str] = []
-            try:
-                async for event in provider.stream_turn(self._history(db, conversation), conversation.teammate.system_prompt, self.registry.schemas()):
-                    if event.type == "text":
-                        yielded_text = True
-                        text_chunks.append(event.content)
-                        yield {"type": "token", "content": event.content}
-                        continue
-                    if not event.tool_calls:
-                        continue
-                    serialized_calls = [{"id": call.id, "type": "function", "function": {"name": call.name, "arguments": call.arguments}} for call in event.tool_calls]
-                    db.add(Message(conversation_id=conversation.id, role="assistant_tool_calls", content=json.dumps(serialized_calls)))
-                    db.commit()
-                    for call in event.tool_calls:
-                        calls_used += 1
-                        if calls_used > self.settings.agent_max_tool_calls:
-                            run.status = "failed"; db.commit()
-                            yield {"type": "error", "message": "Agent tool-call limit reached."}; return
-                        async for item in self._handle_call(db, conversation, run, call):
-                            yield item
-                            if item.get("type") == "approval_required":
-                                run.status = "waiting_approval"; db.commit(); return
-                    break
-                else:
-                    if yielded_text:
-                        db.add(Message(conversation_id=conversation.id, role="assistant", content="".join(text_chunks)))
+        tokens = self._bind_computer(conversation)
+        try:
+            calls_used = 0
+            for iteration in range(self.settings.agent_max_iterations):
+                if self._cancelled(db, run.id):
+                    run.status = "cancelled"; db.commit()
+                    yield {"type": "error", "message": "Task cancelled before further tool execution."}; return
+                yielded_text = False
+                text_chunks: list[str] = []
+                try:
+                    history = self._history(db, conversation)
+                    last_user = next((m["content"] for m in reversed(history) if m.get("role") == "user"), "")
+                    system = self._system_prompt(db, conversation, str(last_user))
+                    async for event in provider.stream_turn(history, system, self.registry.schemas()):
+                        if event.type == "text":
+                            yielded_text = True
+                            text_chunks.append(event.content)
+                            yield {"type": "token", "content": event.content}
+                            continue
+                        if not event.tool_calls:
+                            continue
+                        serialized_calls = [{"id": call.id, "type": "function", "function": {"name": call.name, "arguments": call.arguments}} for call in event.tool_calls]
+                        db.add(Message(conversation_id=conversation.id, role="assistant_tool_calls", content=json.dumps(serialized_calls)))
                         db.commit()
-                        run.status = "completed"; db.commit(); yield {"type": "done", "run_id": run.id}; return
-            except ProviderError as exc:
-                run.status = "failed"; db.commit(); yield {"type": "error", "message": str(exc)}; return
-        run.status = "failed"; db.commit()
-        yield {"type": "error", "message": "Agent iteration limit reached."}
+                        for call in event.tool_calls:
+                            calls_used += 1
+                            if calls_used > self.settings.agent_max_tool_calls:
+                                run.status = "failed"; db.commit()
+                                yield {"type": "error", "message": "Agent tool-call limit reached."}; return
+                            async for item in self._handle_call(db, conversation, run, call):
+                                yield item
+                                if item.get("type") == "approval_required":
+                                    run.status = "waiting_approval"; db.commit(); return
+                        break
+                    else:
+                        if yielded_text:
+                            db.add(Message(conversation_id=conversation.id, role="assistant", content="".join(text_chunks)))
+                            db.commit()
+                            run.status = "completed"; db.commit(); yield {"type": "done", "run_id": run.id}; return
+                except ProviderError as exc:
+                    run.status = "failed"; db.commit(); yield {"type": "error", "message": str(exc)}; return
+            run.status = "failed"; db.commit()
+            yield {"type": "error", "message": "Agent iteration limit reached."}
+        finally:
+            self._unbind_computer(tokens)
 
     async def _handle_call(self, db: Session, conversation: Conversation, run: AgentRun, call: ToolCall) -> AsyncIterator[dict[str, Any]]:
         requested = self._event(db, conversation.id, run.id, "tool_call", "queued", call.name, call.id, {"arguments": call.arguments})
@@ -97,7 +157,14 @@ class AgentRuntime:
         requested.payload = json.dumps({"arguments": public_args}); db.commit()
         validated = self._event(db, conversation.id, run.id, "tool_call", "validated", tool.name, call.id, {"arguments": public_args})
         yield self.public_event(validated)
-        decision = self.permissions.assess(tool)
+        connector_id = "telegram" if (tool.name or "").startswith("telegram_") else None
+        auth = load_auth_context(
+            db,
+            teammate_id=conversation.teammate_id,
+            connector_id=connector_id,
+            skill_allowed_categories=self._skill_categories,
+        )
+        decision = self.permissions.assess(tool, auth)
         if decision.status == "approval_required":
             approval_payload = {
                 "arguments": public_args,
@@ -153,40 +220,44 @@ class AgentRuntime:
         yield self.public_event(finished)
 
     async def resolve_approval(self, db: Session, conversation: Conversation, approval_id: str, decision: str, provider: ModelProvider) -> AsyncIterator[dict[str, Any]]:
-        approval = db.get(ExecutionEvent, approval_id)
-        if not approval or approval.conversation_id != conversation.id or approval.event_type != "approval" or approval.status != "waiting_approval":
-            yield {"type": "error", "message": "Approval request is invalid, stale, or belongs to another conversation."}; return
-        run = db.get(AgentRun, approval.run_id)
-        if not run or run.status != "waiting_approval":
-            yield {"type": "error", "message": "Approval request is no longer active."}; return
-        if decision == "rejected":
-            approval.status = "rejected"; run.status = "completed"; db.commit()
-            rejected = self._event(db, conversation.id, run.id, "tool_result", "rejected", approval.tool_name, approval.tool_call_id, {"error": "User rejected the approval request."})
-            reject_text = "I did not run the approved operation because you rejected it."
-            db.add(Message(conversation_id=conversation.id, role="tool", content=json.dumps({"tool_call_id": approval.tool_call_id, "result": {"error": "User rejected the approval request."}})))
-            db.add(Message(conversation_id=conversation.id, role="assistant", content=reject_text))
-            db.commit()
-            yield self.public_event(rejected)
-            yield {"type": "token", "content": reject_text}
-            yield {"type": "done", "run_id": run.id}
-            return
-        approval.status = "approved"; run.status = "running"; db.commit()
-        payload = json.loads(approval.payload)
-        approved_args = payload.get("arguments")
-        if not isinstance(approved_args, dict):
-            yield {"type": "error", "message": "Approval payload is missing the exact approved arguments."}; return
+        tokens = self._bind_computer(conversation)
         try:
-            # Execute only the exact argument object captured at approval time.
-            tool, arguments, public_args = self.registry.validate(approval.tool_name or "", json.dumps(approved_args, ensure_ascii=False))
-        except ToolError as exc:
-            yield {"type": "error", "message": str(exc)}; return
-        if public_args != approved_args:
-            yield {"type": "error", "message": "Approved arguments no longer match the pending operation. Request approval again."}; return
-        call = ToolCall(approval.tool_call_id or "", approval.tool_name or "", json.dumps(approved_args, ensure_ascii=False))
-        async for item in self._execute_validated(db, conversation, run, call, tool, arguments, public_args):
-            yield item
-        async for item in self.run(db, conversation, provider, run):
-            yield item
+            approval = db.get(ExecutionEvent, approval_id)
+            if not approval or approval.conversation_id != conversation.id or approval.event_type != "approval" or approval.status != "waiting_approval":
+                yield {"type": "error", "message": "Approval request is invalid, stale, or belongs to another conversation."}; return
+            run = db.get(AgentRun, approval.run_id)
+            if not run or run.status != "waiting_approval":
+                yield {"type": "error", "message": "Approval request is no longer active."}; return
+            if decision == "rejected":
+                approval.status = "rejected"; run.status = "completed"; db.commit()
+                rejected = self._event(db, conversation.id, run.id, "tool_result", "rejected", approval.tool_name, approval.tool_call_id, {"error": "User rejected the approval request."})
+                reject_text = "I did not run the approved operation because you rejected it."
+                db.add(Message(conversation_id=conversation.id, role="tool", content=json.dumps({"tool_call_id": approval.tool_call_id, "result": {"error": "User rejected the approval request."}})))
+                db.add(Message(conversation_id=conversation.id, role="assistant", content=reject_text))
+                db.commit()
+                yield self.public_event(rejected)
+                yield {"type": "token", "content": reject_text}
+                yield {"type": "done", "run_id": run.id}
+                return
+            approval.status = "approved"; run.status = "running"; db.commit()
+            payload = json.loads(approval.payload)
+            approved_args = payload.get("arguments")
+            if not isinstance(approved_args, dict):
+                yield {"type": "error", "message": "Approval payload is missing the exact approved arguments."}; return
+            try:
+                # Execute only the exact argument object captured at approval time.
+                tool, arguments, public_args = self.registry.validate(approval.tool_name or "", json.dumps(approved_args, ensure_ascii=False))
+            except ToolError as exc:
+                yield {"type": "error", "message": str(exc)}; return
+            if public_args != approved_args:
+                yield {"type": "error", "message": "Approved arguments no longer match the pending operation. Request approval again."}; return
+            call = ToolCall(approval.tool_call_id or "", approval.tool_name or "", json.dumps(approved_args, ensure_ascii=False))
+            async for item in self._execute_validated(db, conversation, run, call, tool, arguments, public_args):
+                yield item
+            async for item in self.run(db, conversation, provider, run):
+                yield item
+        finally:
+            self._unbind_computer(tokens)
 
     def cancel(self, db: Session, run_id: str) -> bool:
         run = db.get(AgentRun, run_id)

@@ -1,19 +1,25 @@
 import json
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
 from .automations import AutomationService, AutomationWorker
 from .automations.service import AutomationError
 from .automations.webhooks import build_webhook_router
-from .browser import BrowserService, NavigationPolicy
+from .browser import NavigationPolicy
+from .browser.tool_handlers import resolve_teammate_browser
+from .computers import ComputerError, ComputerManager
 from .config import get_settings
 from .connectors import ConnectorManager, InMemoryCredentialStore, build_credential_store
-from .database import Conversation, Message, SessionLocal, Teammate, get_db, init_db
+from .database import ConnectorGrant, Conversation, Message, SessionLocal, Teammate, get_db, init_db
+from .memory import MemoryError, MemoryService
+from .memory.tools import register_memory_tools
 from .permissions import PermissionBroker
 from .providers import build_provider
 from .runtime import AgentRuntime
@@ -25,48 +31,63 @@ from .schemas import (
     AutomationRunReceipt,
     AutomationUpdate,
     ChatRequest,
+    ComputerStatusOut,
+    ConnectorGrantIn,
+    ConnectorGrantOut,
     ConnectorStatusOut,
     ConversationDetail,
     ConversationOut,
     ExecutionEventOut,
     HealthOut,
+    MemoryCreate,
+    MemoryOut,
+    MemoryUpdate,
     MessageOut,
     NotificationOut,
+    SkillEnableIn,
+    SkillInstallCreate,
+    SkillInstallOut,
+    TeammateCreate,
     TeammateOut,
     TelegramConfigureRequest,
     WebhookCreateOut,
+    WorkflowCreate,
+    WorkflowOut,
 )
+from .skills import SkillError, SkillRegistry
 from .tools import ToolRegistry
+from .workflows import WorkflowError, WorkflowService
 
 settings = get_settings()
-browser_service = BrowserService(
-    NavigationPolicy(
-        fixture_mode=settings.browser_fixture_mode,
-        fixture_host=settings.browser_fixture_host,
-        fixture_port=settings.browser_fixture_port,
-    ),
-    headless=settings.browser_headless,
-    navigation_timeout_ms=settings.browser_navigation_timeout_ms,
-    max_actions=settings.browser_max_actions,
-    max_extract_bytes=settings.browser_max_extract_bytes,
-    artifact_dir=settings.browser_artifact_dir,
+navigation_policy = NavigationPolicy(
+    fixture_mode=settings.browser_fixture_mode,
+    fixture_host=settings.browser_fixture_host,
+    fixture_port=settings.browser_fixture_port,
 )
+computer_manager = ComputerManager(settings, SessionLocal, navigation_policy)
+memory_service = MemoryService()
+skill_registry = SkillRegistry(Path(settings.skills_root_dir))
+workflow_service = WorkflowService()
 registry = ToolRegistry(
     settings.agent_default_timezone,
     settings.agent_tool_timeout_seconds,
     settings.agent_max_argument_bytes,
     settings.agent_max_result_bytes,
-    browser=browser_service if settings.browser_enabled else None,
+    browser=None,
     browser_timeout_seconds=settings.browser_tool_timeout_seconds,
+    resolve_browser=resolve_teammate_browser(computer_manager) if settings.browser_enabled else None,
+    computer_manager=computer_manager,
 )
+register_memory_tools(registry, SessionLocal, memory_service, settings.agent_tool_timeout_seconds)
 
 # Ensure schema (including connectors) exists before connector status lookups on import/tests.
 init_db()
+skill_registry.ensure_builtin_seeded()
 
 # Tests may replace credential_store / connector_manager before requests.
 credential_store = build_credential_store()
 connector_manager = ConnectorManager(credential_store, SessionLocal, registry)
-runtime = AgentRuntime(settings, registry, PermissionBroker())
+runtime = AgentRuntime(settings, registry, PermissionBroker(), computer_manager, memory_service)
 automation_service = AutomationService(settings)
 automation_worker = AutomationWorker(settings, SessionLocal, runtime, automation_service)
 
@@ -74,16 +95,18 @@ automation_worker = AutomationWorker(settings, SessionLocal, runtime, automation
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    skill_registry.ensure_builtin_seeded()
+    computer_manager.reconcile_on_startup()
     connector_manager.refresh_tools()
     await automation_worker.start()
     try:
         yield
     finally:
         await automation_worker.stop()
-        await browser_service.close()
+        await computer_manager.shutdown()
 
 
-app = FastAPI(title=settings.app_name, version="0.5.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.7.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=settings.allowed_origins, allow_methods=["*"], allow_headers=["*"])
 app.include_router(build_webhook_router(settings, automation_service))
 
@@ -158,6 +181,159 @@ async def telegram_disconnect() -> dict:
 @app.get("/api/teammates", response_model=list[TeammateOut])
 def list_teammates(db: Session = Depends(get_db)) -> list[Teammate]:
     return db.query(Teammate).order_by(Teammate.id).all()
+
+
+@app.post("/api/teammates", response_model=TeammateOut)
+def create_teammate(request: TeammateCreate, db: Session = Depends(get_db)) -> Teammate:
+    teammate = Teammate(name=request.name.strip(), description=request.description.strip(), system_prompt=request.system_prompt.strip())
+    db.add(teammate)
+    db.commit()
+    db.refresh(teammate)
+    computer_manager.get_or_create_record(db, teammate.id)
+    return teammate
+
+
+@app.get("/api/teammates/{teammate_id}/computer", response_model=ComputerStatusOut)
+def get_computer(teammate_id: int, db: Session = Depends(get_db)) -> dict:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    try:
+        return computer_manager.public_status(db, teammate_id)
+    except ComputerError as exc:
+        raise HTTPException(400, exc.reason) from exc
+
+
+@app.post("/api/teammates/{teammate_id}/computer/start", response_model=ComputerStatusOut)
+async def start_computer(teammate_id: int, headed: bool = False, db: Session = Depends(get_db)) -> dict:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    try:
+        return await computer_manager.start(teammate_id, headed=headed)
+    except ComputerError as exc:
+        raise HTTPException(400, exc.reason) from exc
+
+
+@app.post("/api/teammates/{teammate_id}/computer/stop", response_model=ComputerStatusOut)
+async def stop_computer(teammate_id: int, db: Session = Depends(get_db)) -> dict:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    try:
+        return await computer_manager.stop(teammate_id)
+    except ComputerError as exc:
+        raise HTTPException(400, exc.reason) from exc
+
+
+@app.post("/api/teammates/{teammate_id}/computer/pause", response_model=ComputerStatusOut)
+async def pause_computer(teammate_id: int, db: Session = Depends(get_db)) -> dict:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    try:
+        return await computer_manager.pause(teammate_id)
+    except ComputerError as exc:
+        raise HTTPException(400, exc.reason) from exc
+
+
+@app.post("/api/teammates/{teammate_id}/computer/resume", response_model=ComputerStatusOut)
+async def resume_computer(teammate_id: int, db: Session = Depends(get_db)) -> dict:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    try:
+        return await computer_manager.resume(teammate_id)
+    except ComputerError as exc:
+        raise HTTPException(400, exc.reason) from exc
+
+
+@app.post("/api/teammates/{teammate_id}/computer/takeover", response_model=ComputerStatusOut)
+async def takeover_computer(teammate_id: int, db: Session = Depends(get_db)) -> dict:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    try:
+        return await computer_manager.takeover(teammate_id)
+    except ComputerError as exc:
+        raise HTTPException(400, exc.reason) from exc
+
+
+@app.post("/api/teammates/{teammate_id}/computer/release", response_model=ComputerStatusOut)
+async def release_computer(teammate_id: int, db: Session = Depends(get_db)) -> dict:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    try:
+        return await computer_manager.release_control(teammate_id)
+    except ComputerError as exc:
+        raise HTTPException(400, exc.reason) from exc
+
+
+@app.post("/api/teammates/{teammate_id}/computer/clear-browser", response_model=ComputerStatusOut)
+async def clear_computer_browser(teammate_id: int, confirm: bool = False, db: Session = Depends(get_db)) -> dict:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    try:
+        return await computer_manager.clear_browser_data(teammate_id, confirm=confirm)
+    except ComputerError as exc:
+        raise HTTPException(400, exc.reason) from exc
+
+
+@app.get("/api/teammates/{teammate_id}/computer/preview")
+async def computer_preview(teammate_id: int, db: Session = Depends(get_db)) -> Response:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    try:
+        data = await computer_manager.preview(teammate_id)
+    except ComputerError as exc:
+        raise HTTPException(400, exc.reason) from exc
+    return Response(content=data, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/teammates/{teammate_id}/workspace")
+def list_workspace(teammate_id: int, area: str = Query(default="workspace"), db: Session = Depends(get_db)) -> dict:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    if area not in {"workspace", "artifacts"}:
+        raise HTTPException(400, "area must be workspace or artifacts")
+    try:
+        return {"area": area, "files": computer_manager.list_workspace(teammate_id, area=area)}
+    except ComputerError as exc:
+        raise HTTPException(400, exc.reason) from exc
+
+
+@app.get("/api/teammates/{teammate_id}/workspace/file")
+def read_workspace_file(
+    teammate_id: int,
+    path: str = Query(min_length=1),
+    area: str = Query(default="workspace"),
+    db: Session = Depends(get_db),
+) -> dict:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    try:
+        return computer_manager.read_workspace_file(teammate_id, path, area=area)
+    except ComputerError as exc:
+        raise HTTPException(400, exc.reason) from exc
+
+
+@app.get("/api/teammates/{teammate_id}/workspace/download")
+def download_workspace_file(
+    teammate_id: int,
+    path: str = Query(min_length=1),
+    area: str = Query(default="artifacts"),
+    db: Session = Depends(get_db),
+) -> Response:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    try:
+        abs_path, data = computer_manager.file_bytes(teammate_id, path, area=area)
+    except ComputerError as exc:
+        raise HTTPException(400, exc.reason) from exc
+    media = "application/octet-stream"
+    if abs_path.suffix.lower() == ".png":
+        media = "image/png"
+    elif abs_path.suffix.lower() in {".md", ".txt", ".csv", ".json", ".html"}:
+        media = "text/plain; charset=utf-8"
+    return Response(
+        content=data,
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{abs_path.name}"', "Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/teammates/{teammate_id}/conversations", response_model=list[ConversationOut])
@@ -382,6 +558,298 @@ def read_notification(notification_id: str, db: Session = Depends(get_db)) -> di
         "read": n.read,
         "created_at": n.created_at,
     }
+
+
+# --- Milestone 7: memory, skills, grants, workflows ---
+
+
+@app.get("/api/memories", response_model=list[MemoryOut])
+def list_memories(
+    scope: str | None = None,
+    scope_id: str | None = None,
+    memory_type: str | None = None,
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    rows = memory_service.list(db, scope=scope, scope_id=scope_id, memory_type=memory_type)
+    return [MemoryService.public(r) for r in rows]
+
+
+@app.post("/api/memories", response_model=MemoryOut)
+def create_memory(request: MemoryCreate, db: Session = Depends(get_db)) -> dict:
+    try:
+        row = memory_service.create(db, **request.model_dump())
+    except MemoryError as exc:
+        raise HTTPException(400, exc.reason) from exc
+    return MemoryService.public(row)
+
+
+@app.get("/api/memories/retrieve/for-task", response_model=list[MemoryOut])
+def retrieve_memories_for_task(
+    teammate_id: int,
+    query: str = "",
+    project_id: str | None = None,
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    rows = memory_service.retrieve_for_task(
+        db, teammate_id=teammate_id, project_id=project_id, query=query, limit=settings.memory_max_retrieve
+    )
+    return [MemoryService.public(r) for r in rows]
+
+
+@app.get("/api/memories/{memory_id}", response_model=MemoryOut)
+def get_memory(memory_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return MemoryService.public(memory_service.get(db, memory_id))
+    except MemoryError as exc:
+        raise HTTPException(404, exc.reason) from exc
+
+
+@app.patch("/api/memories/{memory_id}", response_model=MemoryOut)
+def update_memory(memory_id: str, request: MemoryUpdate, db: Session = Depends(get_db)) -> dict:
+    try:
+        return MemoryService.public(memory_service.update(db, memory_id, request.content))
+    except MemoryError as exc:
+        raise HTTPException(400, exc.reason) from exc
+
+
+@app.delete("/api/memories/{memory_id}", response_model=MemoryOut)
+def delete_memory(memory_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return MemoryService.public(memory_service.delete(db, memory_id))
+    except MemoryError as exc:
+        raise HTTPException(404, exc.reason) from exc
+
+
+@app.post("/api/teammates/{teammate_id}/memories/clear")
+def clear_teammate_memories(teammate_id: int, db: Session = Depends(get_db)) -> dict:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    rows = memory_service.list(db, scope="teammate", scope_id=str(teammate_id), limit=500)
+    for row in rows:
+        memory_service.delete(db, row.id)
+    return {"cleared": len(rows), "teammate_id": teammate_id}
+
+
+@app.get("/api/skills/catalog")
+def skills_catalog() -> list[dict]:
+    return [SkillRegistry.public_package(p) for p in skill_registry.catalog()]
+
+
+@app.get("/api/skills/installs", response_model=list[SkillInstallOut])
+def list_skill_installs(teammate_id: int | None = None, db: Session = Depends(get_db)) -> list[dict]:
+    return [SkillRegistry.public_install(r) for r in skill_registry.list_installs(db, teammate_id)]
+
+
+@app.post("/api/skills/installs", response_model=SkillInstallOut)
+def install_skill(request: SkillInstallCreate, db: Session = Depends(get_db)) -> dict:
+    try:
+        package = skill_registry.get_package(request.skill_id)
+        row = skill_registry.install(
+            db,
+            package,
+            teammate_id=request.teammate_id,
+            reviewed=request.reviewed,
+            enabled=request.enabled,
+        )
+    except SkillError as exc:
+        raise HTTPException(400, exc.reason) from exc
+    return SkillRegistry.public_install(row)
+
+
+@app.post("/api/skills/installs/{install_id}/review", response_model=SkillInstallOut)
+def review_skill_install(install_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return SkillRegistry.public_install(skill_registry.mark_reviewed(db, install_id))
+    except SkillError as exc:
+        raise HTTPException(400, exc.reason) from exc
+
+
+@app.post("/api/skills/installs/{install_id}/enable", response_model=SkillInstallOut)
+def enable_skill_install(install_id: str, request: SkillEnableIn, db: Session = Depends(get_db)) -> dict:
+    try:
+        return SkillRegistry.public_install(skill_registry.set_enabled(db, install_id, request.enabled))
+    except SkillError as exc:
+        raise HTTPException(400, exc.reason) from exc
+
+
+@app.get("/api/skills/{skill_id}")
+def get_skill_package(skill_id: str) -> dict:
+    try:
+        return SkillRegistry.public_package(skill_registry.get_package(skill_id))
+    except SkillError as exc:
+        raise HTTPException(404, exc.reason) from exc
+
+
+@app.get("/api/connector-grants", response_model=list[ConnectorGrantOut])
+def list_connector_grants(teammate_id: int | None = None, db: Session = Depends(get_db)) -> list[dict]:
+    q = db.query(ConnectorGrant)
+    if teammate_id is not None:
+        q = q.filter(ConnectorGrant.teammate_id == teammate_id)
+    rows = q.order_by(ConnectorGrant.updated_at.desc()).all()
+    return [
+        {
+            "id": g.id,
+            "teammate_id": g.teammate_id,
+            "connector_id": g.connector_id,
+            "operations": json.loads(g.operations_json or "[]"),
+            "resource_scope": json.loads(g.resource_scope_json or "{}"),
+            "enabled": g.enabled,
+            "created_at": g.created_at,
+            "updated_at": g.updated_at,
+        }
+        for g in rows
+    ]
+
+
+@app.post("/api/connector-grants", response_model=ConnectorGrantOut)
+def upsert_connector_grant(request: ConnectorGrantIn, db: Session = Depends(get_db)) -> dict:
+    if not db.get(Teammate, request.teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    existing = (
+        db.query(ConnectorGrant)
+        .filter(
+            ConnectorGrant.teammate_id == request.teammate_id,
+            ConnectorGrant.connector_id == request.connector_id,
+        )
+        .first()
+    )
+    if existing:
+        existing.operations_json = json.dumps(request.operations)
+        existing.resource_scope_json = json.dumps(request.resource_scope)
+        existing.enabled = request.enabled
+        db.commit()
+        db.refresh(existing)
+        g = existing
+    else:
+        g = ConnectorGrant(
+            id=str(uuid.uuid4()),
+            teammate_id=request.teammate_id,
+            connector_id=request.connector_id,
+            operations_json=json.dumps(request.operations),
+            resource_scope_json=json.dumps(request.resource_scope),
+            enabled=request.enabled,
+        )
+        db.add(g)
+        db.commit()
+        db.refresh(g)
+    return {
+        "id": g.id,
+        "teammate_id": g.teammate_id,
+        "connector_id": g.connector_id,
+        "operations": json.loads(g.operations_json or "[]"),
+        "resource_scope": json.loads(g.resource_scope_json or "{}"),
+        "enabled": g.enabled,
+        "created_at": g.created_at,
+        "updated_at": g.updated_at,
+    }
+
+
+@app.delete("/api/connector-grants/{grant_id}")
+def revoke_connector_grant(grant_id: str, db: Session = Depends(get_db)) -> dict[str, bool]:
+    g = db.get(ConnectorGrant, grant_id)
+    if not g:
+        raise HTTPException(404, "Grant not found")
+    g.enabled = False
+    db.commit()
+    return {"revoked": True}
+
+
+@app.get("/api/workflows", response_model=list[WorkflowOut])
+def list_workflows(teammate_id: int | None = None, db: Session = Depends(get_db)) -> list[dict]:
+    from .database import WorkflowRun
+
+    q = db.query(WorkflowRun)
+    if teammate_id is not None:
+        q = q.filter(WorkflowRun.teammate_id == teammate_id)
+    rows = q.order_by(WorkflowRun.created_at.desc()).limit(50).all()
+    return [workflow_service.public(db, w) for w in rows]
+
+
+@app.post("/api/workflows", response_model=WorkflowOut)
+def create_workflow(request: WorkflowCreate, db: Session = Depends(get_db)) -> dict:
+    if not db.get(Teammate, request.teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    skill_pkg = None
+    skill_version = None
+    skill_id = request.skill_id
+    steps = [s.model_dump() for s in (request.steps or [])]
+    try:
+        if skill_id:
+            _install, skill_pkg = skill_registry.resolve_enabled(db, skill_id, request.teammate_id)
+            skill_version = skill_pkg.version
+            if not steps:
+                steps = workflow_service.plan_from_skill(skill_pkg, request.instruction)
+        memories = memory_service.retrieve_for_task(
+            db,
+            teammate_id=request.teammate_id,
+            project_id=request.project_id,
+            query=request.instruction,
+            limit=settings.memory_max_retrieve,
+        )
+        memory_ids = [m.id for m in memories]
+        run = workflow_service.create(
+            db,
+            teammate_id=request.teammate_id,
+            title=request.title,
+            instruction=request.instruction,
+            steps=steps,
+            skill_id=skill_id,
+            skill_version=skill_version,
+            memory_ids=memory_ids,
+            conversation_id=request.conversation_id,
+        )
+    except (SkillError, WorkflowError) as exc:
+        raise HTTPException(400, getattr(exc, "reason", str(exc))) from exc
+    return workflow_service.public(db, run)
+
+
+@app.get("/api/workflows/{workflow_id}", response_model=WorkflowOut)
+def get_workflow(workflow_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return workflow_service.public(db, workflow_service.get(db, workflow_id))
+    except WorkflowError as exc:
+        raise HTTPException(404, exc.reason) from exc
+
+
+@app.post("/api/workflows/{workflow_id}/advance", response_model=WorkflowOut)
+def advance_workflow(
+    workflow_id: str,
+    complete_execute: bool = False,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Advance one workflow step. Skill category gates are applied only for this call."""
+    try:
+        wf = workflow_service.get(db, workflow_id)
+        skill_pkg = None
+        workspace_root = None
+        if wf.skill_id:
+            try:
+                _, skill_pkg = skill_registry.resolve_enabled(db, wf.skill_id, wf.teammate_id)
+            except SkillError:
+                skill_pkg = None
+        try:
+            store = computer_manager.workspace_for_teammate(wf.teammate_id)
+            workspace_root = store.workspace
+        except Exception:  # noqa: BLE001
+            workspace_root = None
+        previous_categories = runtime._skill_categories
+        try:
+            if skill_pkg is not None:
+                runtime.set_skill_categories(list(skill_pkg.allowed_tool_categories))
+            return workflow_service.advance_deterministic(
+                db,
+                workflow_id,
+                workspace_root=workspace_root,
+                skill=skill_pkg,
+                complete_execute=complete_execute,
+            )
+        finally:
+            # Never leave skill gates on the shared AgentRuntime (breaks other chats/tests).
+            runtime.set_skill_categories(previous_categories)
+    except WorkflowError as exc:
+        raise HTTPException(400, exc.reason) from exc
 
 
 def use_test_connectors(store: InMemoryCredentialStore | None = None) -> ConnectorManager:

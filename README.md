@@ -1,6 +1,6 @@
 # AI Teammates
 
-Local-first desktop AI teammate with a bounded agent loop, Playwright browser tools, a **Telegram Bot API connector**, and a **durable Automations** worker (Milestone 5).
+Local-first desktop AI teammate with a bounded agent loop, Playwright browser tools, a **Telegram Bot API connector**, a **durable Automations** worker (Milestone 5), **per-teammate persistent computers** (Milestone 6), and **persistent memory, versioned skills, scoped connector grants, and multi-step workflows** (Milestone 7).
 
 ## Prerequisites
 
@@ -46,6 +46,28 @@ npm test
 npm run build
 ```
 
+## Milestone 7 — Memory, skills, grants, workflows
+
+1. Sidebar → **Memory** — save scoped preferences (user/teammate/project/task). Secrets are rejected. Delete is soft-delete and permanent for retrieval.
+2. Sidebar → **Skills** — browse builtin packages (`startup-research`, `website-audit`), review & enable per teammate. Skills cannot expand tool permissions.
+3. Same panel → **Connector grants** — optionally restrict which Telegram operations a teammate may use (fail closed when a grant exists).
+4. Sidebar → **Workflows** — create a run from an enabled skill; advance steps; complete execute after writing the expected workspace artifact; final status uses deterministic verification.
+5. Chat still injects retrieved memories into the system prompt (bounded); skill category gates apply when set on the runtime.
+
+See ADR `docs/decisions/0009-memory-skills-scoped-permissions-workflows.md`.
+
+## Milestone 6 — Teammate computers
+
+Each teammate gets a stable local computer under `%LOCALAPPDATA%\AITeammates\computers\<id>\` (`profile/`, `workspace/`, `artifacts/`).
+
+1. Sidebar → **Computer** (select a teammate first).
+2. **Start** / **Start headed** opens that teammate’s persistent Playwright profile (not everyday Chrome).
+3. Chat can use `browser_*` and `workspace_*` tools on that computer only.
+4. **Take over** pauses agent browser actions and opens the same profile headed; **Return control** refreshes state.
+5. Workspace files appear in the Computer panel; **Clear browser data** requires confirmation (workspace kept).
+
+Honest limits: not a full VM; site sessions may expire; backend must be running.
+
 ## Milestone 5 — Automations
 
 Open **Automations** in the sidebar.
@@ -81,4 +103,6 @@ Open **Automations** in the sidebar.
 - `docs/architecture.md`
 - `docs/roadmap.md`
 - `docs/decisions/0007-durable-automations-sqlite-worker.md`
+- `docs/decisions/0008-per-teammate-local-browser-computers.md`
+- `docs/decisions/0009-memory-skills-scoped-permissions-workflows.md`
 - `docs/interview_guide.md`

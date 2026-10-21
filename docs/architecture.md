@@ -2,16 +2,19 @@
 
 ```text
 User -> React/Electron -> FastAPI
-                            |-> AgentRuntime (chat SSE or automation worker)
+                            |-> AgentRuntime (binds current_teammate_id ContextVar)
+                            |      |-> MemoryService (scoped retrieve → system prompt)
                             |      |-> MockProvider / GroqProvider / XAIProvider
-                            |      |-> ToolRegistry + PermissionBroker
+                            |      |-> ToolRegistry + PermissionBroker(+ AuthContext)
+                            |-> ComputerManager -> LocalBrowserComputer (persistent Playwright profile)
+                            |-> SkillRegistry (local SKILL.md packages; review before enable)
+                            |-> WorkflowService (steps, checkpoints, artifact verify)
                             |-> AutomationWorker (lifespan) -> claim AutomationRun -> AgentRuntime
-                            |-> Scheduler tick -> enqueue due automations (occurrence_key)
-                            |-> /hooks/{id} webhook receiver (bearer, hashed secret)
-                            |-> BrowserService / ConnectorManager / SQLite
+                            |-> /hooks/{id} webhook receiver
+                            |-> ConnectorManager + ConnectorGrant / SQLite
 ```
 
-See ADR `0007-durable-automations-sqlite-worker.md`.
+See ADR `0007`, `0008`, and `0009-memory-skills-scoped-permissions-workflows.md`.
 
 ## Request path for a tool-using turn
 
@@ -60,6 +63,18 @@ See `docs/decisions/0004-browser-navigation-security.md` and `0005-playwright-is
 | Webhook | `/hooks/{id}` separate from `/api`; enqueue only, never full sync agent loop |
 
 **Local-only truth:** schedules and webhooks process only while the backend is running. Missed runs follow `skip_catch_up` by default (no flood after multi-day offline).
+
+## Memory, skills, grants, workflows (Milestone 7)
+
+| Subsystem | Role | Does **not** |
+| --- | --- | --- |
+| Conversation history | What was said in one chat | Act as long-term preference store |
+| `MemoryService` | Scoped prefs/facts with provenance + soft-delete | Store secrets; auto-save every reply |
+| Skills | Versioned instruction packages + evaluation criteria | Grant tools, run scripts, install deps |
+| `ConnectorGrant` + `AuthContext` | Per-teammate connector ops when present | Let the model pick another user’s account |
+| `WorkflowService` | Step graph, checkpoints, deterministic verify | Multi-agent delegation; claim success from prose |
+
+Data flow for “use my startup-research skill”: retrieve memories → resolve enabled skill install → create workflow with pinned `skill_version` + `memory_ids` → advance safe steps → write workspace artifact → verify → report. Backend authorization remains authoritative at every tool call.
 
 ## SSE event types
 

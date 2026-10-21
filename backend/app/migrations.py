@@ -70,6 +70,32 @@ def _migrate_m5_automations(engine: Engine, db: Session) -> None:
         )
 
 
+def _migrate_m6_computers(engine: Engine, db: Session) -> None:
+    required = {"computers"}
+    missing = required - _table_names(engine)
+    if missing:
+        Base.metadata.create_all(
+            engine, tables=[Base.metadata.tables[name] for name in missing if name in Base.metadata.tables]
+        )
+    with engine.begin() as conn:
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_computers_teammate ON computers (teammate_id)"))
+
+
+def _migrate_m7_memory_skills_workflows(engine: Engine, db: Session) -> None:
+    required = {"memories", "skill_installs", "connector_grants", "workflow_runs", "workflow_steps"}
+    missing = required - _table_names(engine)
+    if missing:
+        Base.metadata.create_all(
+            engine, tables=[Base.metadata.tables[name] for name in missing if name in Base.metadata.tables]
+        )
+    with engine.begin() as conn:
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_memories_scope ON memories (scope, scope_id, status)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grants_teammate ON connector_grants (teammate_id, connector_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_workflow_steps_wf ON workflow_steps (workflow_id, status)"))
+
+
 MIGRATIONS: list[tuple[str, Callable]] = [
     ("2026_10_m5_automations", _migrate_m5_automations),
+    ("2026_10_m6_computers", _migrate_m6_computers),
+    ("2026_10_m7_memory_skills_workflows", _migrate_m7_memory_skills_workflows),
 ]

@@ -101,6 +101,9 @@ class ToolRegistry:
         max_result_bytes: int,
         browser: BrowserService | None = None,
         browser_timeout_seconds: float = 30.0,
+        *,
+        resolve_browser=None,
+        computer_manager=None,
     ):
         self.default_timezone = default_timezone
         self.max_argument_bytes = max_argument_bytes
@@ -109,10 +112,20 @@ class ToolRegistry:
         self.register(ToolSpec("get_current_time", "Get the current system time in an IANA timezone.", TimeArguments, "read_only", timeout_seconds, get_current_time))
         self.register(ToolSpec("calculate", "Perform one basic arithmetic operation using two finite numbers.", CalculateArguments, "read_only", timeout_seconds, calculate))
         self.register(ToolSpec("demo_request_approval", "Run a harmless local demonstration action only after explicit user approval.", DemoApprovalArguments, "approval_required", timeout_seconds, demo_request_approval))
-        if browser is not None:
+        if browser is not None or resolve_browser is not None:
             from .browser.tool_handlers import register_browser_tools
 
-            register_browser_tools(self, browser, browser_timeout_seconds)
+            register_browser_tools(
+                self,
+                browser,
+                browser_timeout_seconds,
+                resolve_browser=resolve_browser,
+            )
+        if computer_manager is not None:
+            from .computers.workspace_tools import register_workspace_tools
+
+            register_workspace_tools(self, computer_manager, timeout_seconds)
+        # Memory tools are registered from main after MemoryService exists (optional).
 
     def register(self, tool: ToolSpec) -> None:
         if tool.name in self._tools:

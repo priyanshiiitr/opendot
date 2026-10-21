@@ -110,8 +110,56 @@ async function* stream(path: string, init: RequestInit): AsyncGenerator<StreamEv
   }
 }
 
+export type ComputerStatus = {
+  id: string
+  teammate_id: number
+  provider: string
+  state: string
+  human_control: boolean
+  last_url: string | null
+  last_error: string | null
+  last_action: string | null
+  current_task: string | null
+  workspace_path: string
+  artifacts_path: string
+  browser_open: boolean
+  isolation_note?: string
+  message?: string | null
+}
+
 export const api = {
   teammates: () => request<Teammate[]>('/api/teammates'),
+  createTeammate: (name: string, description = '') =>
+    request<Teammate>('/api/teammates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, description }),
+    }),
+  computer: (teammateId: number) => request<ComputerStatus>(`/api/teammates/${teammateId}/computer`),
+  startComputer: (teammateId: number, headed = false) =>
+    request<ComputerStatus>(`/api/teammates/${teammateId}/computer/start?headed=${headed}`, { method: 'POST' }),
+  stopComputer: (teammateId: number) =>
+    request<ComputerStatus>(`/api/teammates/${teammateId}/computer/stop`, { method: 'POST' }),
+  pauseComputer: (teammateId: number) =>
+    request<ComputerStatus>(`/api/teammates/${teammateId}/computer/pause`, { method: 'POST' }),
+  resumeComputer: (teammateId: number) =>
+    request<ComputerStatus>(`/api/teammates/${teammateId}/computer/resume`, { method: 'POST' }),
+  takeoverComputer: (teammateId: number) =>
+    request<ComputerStatus>(`/api/teammates/${teammateId}/computer/takeover`, { method: 'POST' }),
+  releaseComputer: (teammateId: number) =>
+    request<ComputerStatus>(`/api/teammates/${teammateId}/computer/release`, { method: 'POST' }),
+  clearComputerBrowser: (teammateId: number) =>
+    request<ComputerStatus>(`/api/teammates/${teammateId}/computer/clear-browser?confirm=true`, { method: 'POST' }),
+  computerPreviewUrl: (teammateId: number) =>
+    `http://127.0.0.1:8000/api/teammates/${teammateId}/computer/preview?ts=${Date.now()}`,
+  workspaceFiles: (teammateId: number, area: 'workspace' | 'artifacts' = 'workspace') =>
+    request<{ area: string; files: { path: string; bytes: number; suffix: string }[] }>(
+      `/api/teammates/${teammateId}/workspace?area=${area}`,
+    ),
+  workspaceFile: (teammateId: number, path: string, area: 'workspace' | 'artifacts' = 'workspace') =>
+    request<{ path: string; content: string; bytes: number }>(
+      `/api/teammates/${teammateId}/workspace/file?path=${encodeURIComponent(path)}&area=${area}`,
+    ),
   conversations: (teammateId: number) => request<Conversation[]>(`/api/teammates/${teammateId}/conversations`),
   createConversation: (teammateId: number) =>
     request<Conversation>(`/api/teammates/${teammateId}/conversations`, { method: 'POST' }),
@@ -169,6 +217,187 @@ export const api = {
   notifications: (unreadOnly = false) =>
     request<AppNotification[]>(`/api/notifications?unread_only=${unreadOnly ? 'true' : 'false'}`),
   readNotification: (id: string) => request<AppNotification>(`/api/notifications/${id}/read`, { method: 'POST' }),
+  memories: (params?: { scope?: string; scope_id?: string; memory_type?: string }) => {
+    const q = new URLSearchParams()
+    if (params?.scope) q.set('scope', params.scope)
+    if (params?.scope_id) q.set('scope_id', params.scope_id)
+    if (params?.memory_type) q.set('memory_type', params.memory_type)
+    const qs = q.toString()
+    return request<MemoryRecord[]>(`/api/memories${qs ? `?${qs}` : ''}`)
+  },
+  createMemory: (body: MemoryCreate) =>
+    request<MemoryRecord>('/api/memories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  updateMemory: (id: string, content: string) =>
+    request<MemoryRecord>(`/api/memories/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    }),
+  deleteMemory: (id: string) => request<MemoryRecord>(`/api/memories/${id}`, { method: 'DELETE' }),
+  clearTeammateMemories: (teammateId: number) =>
+    request<{ cleared: number }>(`/api/teammates/${teammateId}/memories/clear`, { method: 'POST' }),
+  retrieveMemories: (teammateId: number, query = '', projectId?: string) => {
+    const q = new URLSearchParams({ teammate_id: String(teammateId), query })
+    if (projectId) q.set('project_id', projectId)
+    return request<MemoryRecord[]>(`/api/memories/retrieve/for-task?${q}`)
+  },
+  skillsCatalog: () => request<SkillPackage[]>('/api/skills/catalog'),
+  skillInstalls: (teammateId?: number) =>
+    request<SkillInstall[]>(
+      `/api/skills/installs${teammateId != null ? `?teammate_id=${teammateId}` : ''}`,
+    ),
+  installSkill: (body: { skill_id: string; teammate_id?: number | null; reviewed?: boolean; enabled?: boolean }) =>
+    request<SkillInstall>('/api/skills/installs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  reviewSkill: (installId: string) =>
+    request<SkillInstall>(`/api/skills/installs/${installId}/review`, { method: 'POST' }),
+  enableSkill: (installId: string, enabled: boolean) =>
+    request<SkillInstall>(`/api/skills/installs/${installId}/enable`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    }),
+  skillPackage: (skillId: string) => request<SkillPackage>(`/api/skills/${skillId}`),
+  connectorGrants: (teammateId?: number) =>
+    request<ConnectorGrant[]>(
+      `/api/connector-grants${teammateId != null ? `?teammate_id=${teammateId}` : ''}`,
+    ),
+  upsertConnectorGrant: (body: {
+    teammate_id: number
+    connector_id: string
+    operations: string[]
+    resource_scope?: Record<string, unknown>
+    enabled?: boolean
+  }) =>
+    request<ConnectorGrant>('/api/connector-grants', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  revokeConnectorGrant: (grantId: string) =>
+    request<{ revoked: boolean }>(`/api/connector-grants/${grantId}`, { method: 'DELETE' }),
+  workflows: (teammateId?: number) =>
+    request<WorkflowRun[]>(`/api/workflows${teammateId != null ? `?teammate_id=${teammateId}` : ''}`),
+  createWorkflow: (body: {
+    teammate_id: number
+    title?: string
+    instruction: string
+    skill_id?: string
+    conversation_id?: number
+  }) =>
+    request<WorkflowRun>('/api/workflows', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  workflow: (id: string) => request<WorkflowRun>(`/api/workflows/${id}`),
+  advanceWorkflow: (id: string, completeExecute = false) =>
+    request<WorkflowRun>(`/api/workflows/${id}/advance?complete_execute=${completeExecute}`, { method: 'POST' }),
+}
+
+export type MemoryRecord = {
+  id: string
+  memory_type: string
+  scope: string
+  scope_id: string
+  content: string
+  source: string
+  status: string
+  tags: string[]
+  source_conversation_id: number | null
+  source_run_id: string | null
+  supersedes_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type MemoryCreate = {
+  content: string
+  memory_type?: string
+  scope?: string
+  scope_id?: string
+  source?: string
+  tags?: string[]
+}
+
+export type SkillPackage = {
+  skill_id: string
+  version: string
+  name: string
+  description: string
+  when_to_use: string
+  required_inputs: string[]
+  expected_outputs: string[]
+  allowed_tool_categories: string[]
+  required_permissions: string[]
+  constraints: string[]
+  evaluation_criteria: string[]
+  instructions_md: string
+  package_path: string
+}
+
+export type SkillInstall = {
+  id: string
+  skill_id: string
+  version: string
+  name: string
+  enabled: boolean
+  teammate_id: number | null
+  package_path: string
+  allowed_tool_categories: string[]
+  reviewed: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type ConnectorGrant = {
+  id: string
+  teammate_id: number
+  connector_id: string
+  operations: string[]
+  resource_scope: Record<string, unknown>
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type WorkflowRun = {
+  id: string
+  teammate_id: number
+  conversation_id: number | null
+  title: string
+  instruction: string
+  skill_id: string | null
+  skill_version: string | null
+  status: string
+  memory_ids: string[]
+  report: Record<string, unknown>
+  steps: {
+    id: string
+    step_key: string
+    description: string
+    depends_on: string[]
+    status: string
+    tool_name: string | null
+    attempts: number
+    output: Record<string, unknown>
+    artifact_path: string | null
+    error_message: string | null
+    checkpoint: Record<string, unknown>
+    started_at: string | null
+    finished_at: string | null
+  }[]
+  created_at: string
+  updated_at: string
+  finished_at: string | null
+  awaiting?: string
 }
 
 export type Automation = {

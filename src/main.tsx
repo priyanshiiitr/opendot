@@ -6,18 +6,24 @@ import {
   Automation,
   AutomationRun,
   AutomationRunReceipt,
+  ComputerStatus,
+  ConnectorGrant,
   ConnectorStatus,
   Conversation,
   ExecutionEvent,
   isSuccessfulTerminal,
+  MemoryRecord,
   Message,
+  SkillInstall,
+  SkillPackage,
   StreamEvent,
   Teammate,
   toActivity,
+  WorkflowRun,
 } from './api'
 import './styles.css'
 
-type View = 'chat' | 'automations'
+type View = 'chat' | 'automations' | 'computer' | 'memory' | 'skills' | 'workflows'
 
 function Activity({
   events,
@@ -159,6 +165,549 @@ function ConnectionsPanel({
         {note && <p className="connection-note">{note}</p>}
       </div>
     </div>
+  )
+}
+
+function ComputerPanel({
+  teammate,
+  onError,
+}: {
+  teammate?: Teammate
+  onError: (message: string) => void
+}) {
+  const [status, setStatus] = useState<ComputerStatus | null>(null)
+  const [preview, setPreview] = useState('')
+  const [files, setFiles] = useState<{ path: string; bytes: number }[]>([])
+  const [filePreview, setFilePreview] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [panelVisible, setPanelVisible] = useState(true)
+
+  async function refresh() {
+    if (!teammate) return
+    const next = await api.computer(teammate.id)
+    setStatus(next)
+    const listing = await api.workspaceFiles(teammate.id, 'workspace')
+    setFiles(listing.files)
+  }
+
+  useEffect(() => {
+    refresh().catch((e) => onError(e instanceof Error ? e.message : 'Computer status failed'))
+  }, [teammate?.id])
+
+  useEffect(() => {
+    if (!teammate || !panelVisible || !status?.browser_open) return
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const url = api.computerPreviewUrl(teammate.id)
+        if (!cancelled) setPreview(url)
+      } catch {
+        /* preview optional */
+      }
+    }
+    void tick()
+    const id = setInterval(() => void tick(), 2000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [teammate?.id, panelVisible, status?.browser_open, status?.state])
+
+  useEffect(() => {
+    const onVis = () => setPanelVisible(document.visibilityState === 'visible')
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [])
+
+  async function act(fn: () => Promise<ComputerStatus>) {
+    if (!teammate) return
+    setBusy(true)
+    try {
+      setStatus(await fn())
+      await refresh()
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Computer action failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!teammate) return <div className="empty"><h2>Select a teammate</h2></div>
+
+  const human = status?.human_control || status?.state === 'human_control'
+
+  return (
+    <section className="computer-panel">
+      <div className="computer-grid">
+        <div>
+          <p className="connection-help">
+            State: <strong>{(status?.state || '…').replaceAll('_', ' ')}</strong>
+            {human ? ' · HUMAN IN CONTROL' : ''}
+            {status?.last_url ? ` · ${status.last_url}` : ''}
+          </p>
+          <p className="connection-help">{status?.isolation_note}</p>
+          <div className="connection-actions">
+            <button disabled={busy} onClick={() => act(() => api.startComputer(teammate.id, false))}>
+              Start
+            </button>
+            <button disabled={busy} onClick={() => act(() => api.startComputer(teammate.id, true))}>
+              Start headed
+            </button>
+            <button disabled={busy || human} onClick={() => act(() => api.pauseComputer(teammate.id))}>
+              Pause
+            </button>
+            <button disabled={busy || human} onClick={() => act(() => api.resumeComputer(teammate.id))}>
+              Resume
+            </button>
+            <button disabled={busy || human} onClick={() => act(() => api.takeoverComputer(teammate.id))}>
+              Take over
+            </button>
+            <button disabled={busy || !human} onClick={() => act(() => api.releaseComputer(teammate.id))}>
+              Return control
+            </button>
+            <button disabled={busy} onClick={() => act(() => api.stopComputer(teammate.id))}>
+              Close browser
+            </button>
+            <button
+              className="reject"
+              disabled={busy}
+              onClick={() => {
+                if (window.confirm('Delete this teammate’s browser profile/cookies? Workspace files are kept.')) {
+                  void act(() => api.clearComputerBrowser(teammate.id))
+                }
+              }}
+            >
+              Clear browser data
+            </button>
+          </div>
+          {status?.last_error && <p className="connection-warn">{status.last_error}</p>}
+          <div className="preview-frame">
+            {preview && status?.browser_open ? (
+              <img src={preview} alt="Teammate browser preview" />
+            ) : (
+              <div className="preview-empty">Preview appears when the browser is open.</div>
+            )}
+          </div>
+        </div>
+        <div>
+          <div className="side-label">WORKSPACE FILES</div>
+          {files.length === 0 && <p className="connection-help">No files yet. Ask the teammate to save a report.</p>}
+          {files.map((f) => (
+            <button
+              key={f.path}
+              className="run-row"
+              onClick={() => {
+                void api
+                  .workspaceFile(teammate.id, f.path)
+                  .then((r) => setFilePreview(r.content))
+                  .catch((e) => onError(e instanceof Error ? e.message : 'Read failed'))
+              }}
+            >
+              <strong>{f.path}</strong>
+              <small>{f.bytes} bytes</small>
+            </button>
+          ))}
+          {filePreview && <pre className="auto-secret">{filePreview.slice(0, 4000)}</pre>}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function MemoryPanel({
+  teammate,
+  onError,
+}: {
+  teammate: Teammate | null
+  onError: (msg: string) => void
+}) {
+  const [rows, setRows] = useState<MemoryRecord[]>([])
+  const [content, setContent] = useState('')
+  const [scope, setScope] = useState('user')
+  const [filter, setFilter] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  async function refresh() {
+    const data = await api.memories(scope ? { scope } : undefined)
+    setRows(data)
+  }
+
+  useEffect(() => {
+    refresh().catch((e) => onError(e instanceof Error ? e.message : 'Failed to load memories'))
+  }, [scope])
+
+  async function save() {
+    if (!content.trim()) return
+    setBusy(true)
+    try {
+      await api.createMemory({
+        content: content.trim(),
+        memory_type: scope === 'teammate' ? 'teammate' : 'preference',
+        scope,
+        scope_id: scope === 'teammate' && teammate ? String(teammate.id) : 'default',
+        source: 'explicit',
+      })
+      setContent('')
+      await refresh()
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Could not save memory')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const visible = rows.filter(
+    (r) => !filter || r.content.toLowerCase().includes(filter.toLowerCase()) || r.id.includes(filter),
+  )
+
+  return (
+    <section className="m7-panel">
+      <p className="auto-instruction">
+        Persistent memories are scoped facts and preferences — not full chat history. Deleted memories stay deleted.
+        Secrets are rejected. Inferred items are labeled separately from explicit user preferences.
+      </p>
+      <div className="m7-grid">
+        <div className="auto-list">
+          <label>
+            Scope filter
+            <select value={scope} onChange={(e) => setScope(e.target.value)}>
+              <option value="user">user</option>
+              <option value="teammate">teammate</option>
+              <option value="project">project</option>
+              <option value="task">task</option>
+            </select>
+          </label>
+          <label>
+            Search
+            <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter content…" />
+          </label>
+          <label>
+            New memory
+            <textarea value={content} onChange={(e) => setContent(e.target.value)} rows={4} placeholder="Prefer concise reports…" />
+          </label>
+          <div className="connection-actions">
+            <button disabled={busy || !content.trim()} onClick={() => void save()}>
+              Save preference
+            </button>
+            {teammate && (
+              <button
+                className="reject"
+                disabled={busy}
+                onClick={() =>
+                  void api
+                    .clearTeammateMemories(teammate.id)
+                    .then(refresh)
+                    .catch((e) => onError(e instanceof Error ? e.message : 'Clear failed'))
+                }
+              >
+                Clear teammate memory
+              </button>
+            )}
+          </div>
+        </div>
+        <div>
+          {visible.map((m) => (
+            <div className={`run-row ${m.status}`} key={m.id}>
+              <strong>
+                {m.memory_type} · {m.scope}:{m.scope_id}
+              </strong>
+              <small>
+                {m.source} · {m.id.slice(0, 8)}
+                {m.supersedes_id ? ` · corrects ${m.supersedes_id.slice(0, 8)}` : ''}
+              </small>
+              <p className="auto-instruction" style={{ width: '100%', margin: '6px 0 0' }}>
+                {m.content}
+              </p>
+              <button
+                className="run-cancel"
+                onClick={() =>
+                  void api
+                    .deleteMemory(m.id)
+                    .then(refresh)
+                    .catch((e) => onError(e instanceof Error ? e.message : 'Delete failed'))
+                }
+              >
+                Delete
+              </button>
+            </div>
+          ))}
+          {!visible.length && <p className="auto-instruction">No active memories in this scope.</p>}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function SkillsPanel({
+  teammate,
+  onError,
+}: {
+  teammate: Teammate | null
+  onError: (msg: string) => void
+}) {
+  const [catalog, setCatalog] = useState<SkillPackage[]>([])
+  const [installs, setInstalls] = useState<SkillInstall[]>([])
+  const [selected, setSelected] = useState<SkillPackage | null>(null)
+  const [grants, setGrants] = useState<ConnectorGrant[]>([])
+
+  async function refresh() {
+    const [c, i, g] = await Promise.all([
+      api.skillsCatalog(),
+      api.skillInstalls(teammate?.id),
+      api.connectorGrants(teammate?.id),
+    ])
+    setCatalog(c)
+    setInstalls(i)
+    setGrants(g)
+  }
+
+  useEffect(() => {
+    refresh().catch((e) => onError(e instanceof Error ? e.message : 'Failed to load skills'))
+  }, [teammate?.id])
+
+  return (
+    <section className="m7-panel">
+      <p className="auto-instruction">
+        Skills are versioned instruction packages. They never grant tool permissions — the PermissionBroker stays
+        authoritative. Review before enable. Connector grants below control which teammate may use Telegram ops.
+      </p>
+      <div className="m7-grid">
+        <div className="auto-list">
+          <h3>Catalogue</h3>
+          {catalog.map((s) => (
+            <button key={s.skill_id} className="run-row" onClick={() => setSelected(s)}>
+              <strong>{s.name}</strong>
+              <small>
+                {s.skill_id}@{s.version}
+              </small>
+            </button>
+          ))}
+          {selected && teammate && (
+            <div className="connection-actions" style={{ marginTop: 12 }}>
+              <button
+                onClick={() =>
+                  void api
+                    .installSkill({
+                      skill_id: selected.skill_id,
+                      teammate_id: teammate.id,
+                      reviewed: true,
+                      enabled: true,
+                    })
+                    .then(refresh)
+                    .catch((e) => onError(e instanceof Error ? e.message : 'Install failed'))
+                }
+              >
+                Review & enable for {teammate.name}
+              </button>
+            </div>
+          )}
+          <h3 style={{ marginTop: 24 }}>Connector grants</h3>
+          {teammate && (
+            <button
+              onClick={() =>
+                void api
+                  .upsertConnectorGrant({
+                    teammate_id: teammate.id,
+                    connector_id: 'telegram',
+                    operations: ['telegram_get_bot_info', 'telegram_get_recent_updates'],
+                    enabled: true,
+                  })
+                  .then(refresh)
+                  .catch((e) => onError(e instanceof Error ? e.message : 'Grant failed'))
+              }
+            >
+              Grant Telegram read ops
+            </button>
+          )}
+          {grants.map((g) => (
+            <div className={`run-row ${g.enabled ? '' : 'failed'}`} key={g.id}>
+              <strong>
+                {g.connector_id} → teammate {g.teammate_id}
+              </strong>
+              <small>{g.operations.join(', ') || '(none)'}</small>
+              {g.enabled && (
+                <button
+                  className="run-cancel"
+                  onClick={() =>
+                    void api
+                      .revokeConnectorGrant(g.id)
+                      .then(refresh)
+                      .catch((e) => onError(e instanceof Error ? e.message : 'Revoke failed'))
+                  }
+                >
+                  Revoke
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+        <div>
+          <h3>Installs</h3>
+          {installs.map((i) => (
+            <div className={`run-row ${i.enabled ? 'waiting_approval' : ''}`} key={i.id}>
+              <strong>
+                {i.name} {i.enabled ? '· enabled' : '· disabled'}
+              </strong>
+              <small>
+                {i.skill_id}@{i.version} · reviewed={String(i.reviewed)}
+              </small>
+              <button
+                onClick={() =>
+                  void api
+                    .enableSkill(i.id, !i.enabled)
+                    .then(refresh)
+                    .catch((e) => onError(e instanceof Error ? e.message : 'Toggle failed'))
+                }
+              >
+                {i.enabled ? 'Disable' : 'Enable'}
+              </button>
+            </div>
+          ))}
+          {selected && (
+            <div className="receipt">
+              <h3>
+                {selected.name} · v{selected.version}
+              </h3>
+              <p className="auto-instruction">{selected.description}</p>
+              <pre className="auto-secret">{selected.instructions_md.slice(0, 4000)}</pre>
+              <small>Categories: {selected.allowed_tool_categories.join(', ')}</small>
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function WorkflowsPanel({
+  teammate,
+  onError,
+}: {
+  teammate: Teammate | null
+  onError: (msg: string) => void
+}) {
+  const [rows, setRows] = useState<WorkflowRun[]>([])
+  const [selected, setSelected] = useState<WorkflowRun | null>(null)
+  const [instruction, setInstruction] = useState('Research AI startups and save a shortlist report.')
+  const [skillId, setSkillId] = useState('startup-research')
+  const [busy, setBusy] = useState(false)
+
+  async function refresh() {
+    if (!teammate) return
+    const data = await api.workflows(teammate.id)
+    setRows(data)
+  }
+
+  useEffect(() => {
+    refresh().catch((e) => onError(e instanceof Error ? e.message : 'Failed to load workflows'))
+  }, [teammate?.id])
+
+  async function create() {
+    if (!teammate) return
+    setBusy(true)
+    try {
+      const wf = await api.createWorkflow({
+        teammate_id: teammate.id,
+        title: 'Skill workflow',
+        instruction,
+        skill_id: skillId || undefined,
+      })
+      setSelected(wf)
+      await refresh()
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Create workflow failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function advance(completeExecute = false) {
+    if (!selected) return
+    setBusy(true)
+    try {
+      const next = await api.advanceWorkflow(selected.id, completeExecute)
+      setSelected(next)
+      await refresh()
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Advance failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="m7-panel">
+      <p className="auto-instruction">
+        Multi-step workflows persist step status and checkpoints. Safe steps resume without redoing completed work.
+        Final success requires verified artifacts, not fluent model text.
+      </p>
+      <div className="m7-grid">
+        <div className="auto-list">
+          <label>
+            Skill id
+            <input value={skillId} onChange={(e) => setSkillId(e.target.value)} />
+          </label>
+          <label>
+            Instruction
+            <textarea value={instruction} onChange={(e) => setInstruction(e.target.value)} rows={4} />
+          </label>
+          <button disabled={busy || !teammate} onClick={() => void create()}>
+            Create workflow
+          </button>
+          <h3 style={{ marginTop: 20 }}>Runs</h3>
+          {rows.map((w) => (
+            <button key={w.id} className={`run-row ${w.status}`} onClick={() => setSelected(w)}>
+              <strong>{w.title}</strong>
+              <small>
+                {w.status} · {w.skill_id || 'no skill'}@{w.skill_version || '—'}
+              </small>
+            </button>
+          ))}
+        </div>
+        <div>
+          {selected ? (
+            <div className="receipt">
+              <h2>{selected.title}</h2>
+              <p className="auto-instruction">{selected.instruction}</p>
+              <small>
+                Status: {selected.status}
+                {selected.awaiting ? ` · awaiting ${selected.awaiting}` : ''}
+              </small>
+              <div className="connection-actions">
+                <button disabled={busy} onClick={() => void advance(false)}>
+                  Advance next step
+                </button>
+                <button disabled={busy} onClick={() => void advance(true)}>
+                  Complete execute step
+                </button>
+              </div>
+              {selected.steps.map((s) => (
+                <div className={`run-row ${s.status}`} key={s.id}>
+                  <strong>
+                    {s.step_key} · {s.status}
+                  </strong>
+                  <small>
+                    attempts {s.attempts}
+                    {s.error_message ? ` · ${s.error_message}` : ''}
+                  </small>
+                  <p className="auto-instruction" style={{ width: '100%', margin: 0 }}>
+                    {s.description}
+                  </p>
+                </div>
+              ))}
+              {Object.keys(selected.report || {}).length > 0 && (
+                <pre className="auto-secret">{JSON.stringify(selected.report, null, 2)}</pre>
+              )}
+              {selected.memory_ids?.length > 0 && (
+                <small>Memories used: {selected.memory_ids.map((id) => id.slice(0, 8)).join(', ')}</small>
+              )}
+            </div>
+          ) : (
+            <p className="auto-instruction">Select or create a workflow to inspect steps.</p>
+          )}
+        </div>
+      </div>
+    </section>
   )
 }
 
@@ -593,6 +1142,34 @@ function App() {
             </small>
           </span>
         </button>
+        <button className={`teammate ${view === 'computer' ? 'active' : ''}`} onClick={() => setView('computer')}>
+          <span className="avatar">P</span>
+          <span>
+            <strong>Computer</strong>
+            <small>preview · takeover</small>
+          </span>
+        </button>
+        <button className={`teammate ${view === 'memory' ? 'active' : ''}`} onClick={() => setView('memory')}>
+          <span className="avatar">M</span>
+          <span>
+            <strong>Memory</strong>
+            <small>prefs · scopes</small>
+          </span>
+        </button>
+        <button className={`teammate ${view === 'skills' ? 'active' : ''}`} onClick={() => setView('skills')}>
+          <span className="avatar">S</span>
+          <span>
+            <strong>Skills</strong>
+            <small>versioned packs</small>
+          </span>
+        </button>
+        <button className={`teammate ${view === 'workflows' ? 'active' : ''}`} onClick={() => setView('workflows')}>
+          <span className="avatar">W</span>
+          <span>
+            <strong>Workflows</strong>
+            <small>steps · verify</small>
+          </span>
+        </button>
         <ConnectionsPanel status={telegram} onChanged={setTelegram} />
         {notifications.length > 0 && (
           <div className="connections">
@@ -675,7 +1252,7 @@ function App() {
               </button>
             </form>
           </>
-        ) : (
+        ) : view === 'automations' ? (
           <>
             <header>
               <div>
@@ -688,6 +1265,62 @@ function App() {
             </header>
             {error && <div className="error">{error}</div>}
             <AutomationsPanel teammates={teammates} onError={setError} />
+          </>
+        ) : view === 'memory' ? (
+          <>
+            <header>
+              <div>
+                <p className="eyebrow">PERSISTENT MEMORY</p>
+                <h1>Memories</h1>
+              </div>
+              <span className="status">
+                <i /> scoped · inspectable
+              </span>
+            </header>
+            {error && <div className="error">{error}</div>}
+            <MemoryPanel teammate={selected ?? null} onError={setError} />
+          </>
+        ) : view === 'skills' ? (
+          <>
+            <header>
+              <div>
+                <p className="eyebrow">REUSABLE SKILLS</p>
+                <h1>Skills & grants</h1>
+              </div>
+              <span className="status">
+                <i /> reviewed before enable
+              </span>
+            </header>
+            {error && <div className="error">{error}</div>}
+            <SkillsPanel teammate={selected ?? null} onError={setError} />
+          </>
+        ) : view === 'workflows' ? (
+          <>
+            <header>
+              <div>
+                <p className="eyebrow">MULTI-STEP WORKFLOWS</p>
+                <h1>Workflows</h1>
+              </div>
+              <span className="status">
+                <i /> checkpoints · verify
+              </span>
+            </header>
+            {error && <div className="error">{error}</div>}
+            <WorkflowsPanel teammate={selected ?? null} onError={setError} />
+          </>
+        ) : (
+          <>
+            <header>
+              <div>
+                <p className="eyebrow">ISOLATED COMPUTER</p>
+                <h1>{selected?.name || 'Teammate'} Computer</h1>
+              </div>
+              <span className="status">
+                <i /> local browser profile
+              </span>
+            </header>
+            {error && <div className="error">{error}</div>}
+            <ComputerPanel teammate={selected} onError={setError} />
           </>
         )}
       </main>

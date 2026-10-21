@@ -183,6 +183,125 @@ class AppNotification(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class ComputerRecord(Base):
+    """Persistent metadata for a teammate's isolated local browser computer."""
+
+    __tablename__ = "computers"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    teammate_id: Mapped[int] = mapped_column(ForeignKey("teammates.id"), unique=True)
+    provider: Mapped[str] = mapped_column(String(40), default="local_browser")
+    state: Mapped[str] = mapped_column(String(40), default="stopped")
+    root_path: Mapped[str] = mapped_column(Text, default="")
+    last_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_action: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    current_task: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    human_control: Mapped[bool] = mapped_column(Boolean, default=False)
+    preview_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MemoryRecord(Base):
+    """Scoped, inspectable persistent memory (not full conversation history)."""
+
+    __tablename__ = "memories"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    memory_type: Mapped[str] = mapped_column(String(40))  # preference | teammate | project | task | fact
+    scope: Mapped[str] = mapped_column(String(40))  # user | teammate | project | task
+    scope_id: Mapped[str] = mapped_column(String(120), default="default")
+    content: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(40), default="explicit")  # explicit | inferred
+    status: Mapped[str] = mapped_column(String(40), default="active")  # active | superseded | deleted
+    tags_json: Mapped[str] = mapped_column(Text, default="[]")
+    source_conversation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    supersedes_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
+class SkillInstall(Base):
+    """Installed/enabled skill metadata; instruction body lives on disk by skill_id@version."""
+
+    __tablename__ = "skill_installs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    skill_id: Mapped[str] = mapped_column(String(120))
+    version: Mapped[str] = mapped_column(String(40))
+    name: Mapped[str] = mapped_column(String(200))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    teammate_id: Mapped[int | None] = mapped_column(ForeignKey("teammates.id"), nullable=True)
+    package_path: Mapped[str] = mapped_column(Text, default="")
+    allowed_tool_categories_json: Mapped[str] = mapped_column(Text, default="[]")
+    reviewed: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
+class ConnectorGrant(Base):
+    """Which teammate may use which connector instance / operations."""
+
+    __tablename__ = "connector_grants"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    teammate_id: Mapped[int] = mapped_column(ForeignKey("teammates.id"))
+    connector_id: Mapped[str] = mapped_column(String(64))
+    operations_json: Mapped[str] = mapped_column(Text, default="[]")  # e.g. ["telegram_get_bot_info", ...]
+    resource_scope_json: Mapped[str] = mapped_column(Text, default="{}")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
+class WorkflowRun(Base):
+    """Multi-step single-agent workflow (extends durable execution beyond one chat turn)."""
+
+    __tablename__ = "workflow_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    teammate_id: Mapped[int] = mapped_column(ForeignKey("teammates.id"))
+    conversation_id: Mapped[int | None] = mapped_column(ForeignKey("conversations.id"), nullable=True)
+    automation_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    title: Mapped[str] = mapped_column(String(200), default="Workflow")
+    instruction: Mapped[str] = mapped_column(Text, default="")
+    skill_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    skill_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    status: Mapped[str] = mapped_column(String(40), default="pending")
+    memory_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    report_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WorkflowStep(Base):
+    __tablename__ = "workflow_steps"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.id"))
+    step_key: Mapped[str] = mapped_column(String(80))
+    description: Mapped[str] = mapped_column(Text, default="")
+    depends_on_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(40), default="pending")
+    tool_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    output_json: Mapped[str] = mapped_column(Text, default="{}")
+    artifact_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checkpoint_json: Mapped[str] = mapped_column(Text, default="{}")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 def _engine_url() -> str:
     settings = get_settings()
     if settings.database_url.startswith("sqlite:///./"):

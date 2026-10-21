@@ -36,3 +36,22 @@ User: “research startups” → Mock emits `browser_open` → `NavigationPolic
 - **Approvals survive restart:** `waiting_approval` is never auto-approved on boot.
 - **Schedules:** timezone via `zoneinfo`; `occurrence_key` prevents duplicate fires; missed policy skips catch-up floods.
 - **Webhooks:** separate route, hashed secret, dedupe by event id, enqueue only — do not run the agent inside the HTTP request.
+
+## Milestone 6
+
+- **Computer ≠ chat:** each teammate has a stable computer id, profile dir, and workspace under app data — not under the git repo.
+- **Persistent context:** `launch_persistent_context` keeps cookies across restarts; profile lock prevents two Chromium processes on one dir.
+- **ContextVar ownership:** tools never trust model-supplied computer IDs; runtime binds the teammate for the turn.
+- **Takeover:** backend `human_control` blocks agent browser mutations; headed reopen uses the same profile; crash clears human_control (must re-takeover).
+- **Workspace security:** resolve + `relative_to` root; reject `..`, absolutes, symlinks; size/type limits.
+- **Honest scope:** local Playwright computer is not a VM or unrestricted OS desktop.
+
+## Milestone 7
+
+- **History ≠ memory:** chat transcripts stay in `messages`; durable prefs live in `memories` with scope + status. Retrieval is bounded keyword overlap, not “stuff the whole past into the prompt.”
+- **Explicit vs inferred:** `source=explicit` outranks inferred; corrections supersede rather than silently rewrite.
+- **Skills are packages, not personas:** `SKILL.md` + metadata; review before enable; version pinned on workflow runs.
+- **Prompt ≠ permission:** skill text and memory text are untrusted context. `PermissionBroker` + grants decide tools.
+- **Grants fail closed when present:** no grant keeps legacy Telegram rules; a grant without `telegram_send_message` denies send.
+- **Workflows verify artifacts:** success requires expected files/sections, not fluent final answers. Safe tools may retry; consequential uncertain steps need reconciliation.
+- **Interview framing:** four subsystems (memory / skills / permissions / workflows) compose; none may elevate another via natural language.

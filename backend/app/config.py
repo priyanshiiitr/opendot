@@ -42,6 +42,15 @@ class Settings(BaseSettings):
     automation_default_timezone: str = "Asia/Calcutta"
     webhook_max_body_bytes: int = 65_536
     webhook_rate_limit_per_minute: int = 30
+    # Milestone 6 — per-teammate computers (persistent browser + workspace under app data).
+    computers_root_dir: str = ""  # empty → %LOCALAPPDATA%/AITeammates/computers (or ./data/computers)
+    computer_preview_max_width: int = 1024
+    computer_preview_min_interval_ms: int = 1500
+    computer_max_file_bytes: int = 256_000
+    computer_headless_default: bool = True
+    # Milestone 7 — memory / skills / workflows
+    skills_root_dir: str = "./data/skills"
+    memory_max_retrieve: int = 12
     model_config = SettingsConfigDict(env_file=".env", env_prefix="AI_TEAMMATES_", extra="ignore")
 
     @property
