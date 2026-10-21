@@ -94,8 +94,44 @@ def _migrate_m7_memory_skills_workflows(engine: Engine, db: Session) -> None:
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_workflow_steps_wf ON workflow_steps (workflow_id, status)"))
 
 
+def _migrate_m8_teams(engine: Engine, db: Session) -> None:
+    """Teams + parent/child runs; additive teammate columns for enable/role."""
+    with engine.begin() as conn:
+        cols = {c["name"] for c in inspect(engine).get_columns("teammates")}
+        if "enabled" not in cols:
+            conn.execute(text("ALTER TABLE teammates ADD COLUMN enabled BOOLEAN DEFAULT 1 NOT NULL"))
+        if "role_label" not in cols:
+            conn.execute(text("ALTER TABLE teammates ADD COLUMN role_label VARCHAR(80) DEFAULT ''"))
+    required = {"teams", "team_runs", "team_subtasks", "team_events"}
+    missing = required - _table_names(engine)
+    if missing:
+        Base.metadata.create_all(
+            engine, tables=[Base.metadata.tables[name] for name in missing if name in Base.metadata.tables]
+        )
+    with engine.begin() as conn:
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_team_subtasks_run ON team_subtasks (team_run_id, status)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_team_events_run ON team_events (team_run_id, created_at)"))
+
+
+def _migrate_m9_remote_access(engine: Engine, db: Session) -> None:
+    required = {"pairing_challenges", "device_sessions", "security_audit_events"}
+    missing = required - _table_names(engine)
+    if missing:
+        Base.metadata.create_all(
+            engine, tables=[Base.metadata.tables[name] for name in missing if name in Base.metadata.tables]
+        )
+    with engine.begin() as conn:
+        cols = {c["name"] for c in inspect(engine).get_columns("app_notifications")}
+        if "link_ref" not in cols:
+            conn.execute(text("ALTER TABLE app_notifications ADD COLUMN link_ref VARCHAR(200)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_sessions_hash ON device_sessions (token_hash)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_pairing_expires ON pairing_challenges (expires_at)"))
+
+
 MIGRATIONS: list[tuple[str, Callable]] = [
     ("2026_10_m5_automations", _migrate_m5_automations),
     ("2026_10_m6_computers", _migrate_m6_computers),
     ("2026_10_m7_memory_skills_workflows", _migrate_m7_memory_skills_workflows),
+    ("2026_10_m8_multi_agent_teams", _migrate_m8_teams),
+    ("2026_10_m9_remote_access", _migrate_m9_remote_access),
 ]

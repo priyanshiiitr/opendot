@@ -51,6 +51,26 @@ class Settings(BaseSettings):
     # Milestone 7 — memory / skills / workflows
     skills_root_dir: str = "./data/skills"
     memory_max_retrieve: int = 12
+    # Milestone 8 — multi-agent teams (bounded coordinator)
+    team_max_subtasks: int = 12
+    team_max_concurrent: int = 2
+    team_max_depth: int = 1
+    team_max_retries: int = 1
+    team_max_total_runs: int = 20
+    team_shared_artifacts_root: str = "./data/team_artifacts"
+    # Milestone 9 — always-on service + optional remote companion (disabled by default)
+    bind_host: str = "127.0.0.1"
+    bind_port: int = 8000
+    remote_access_enabled: bool = False
+    local_trust_loopback: bool = True  # desktop/Electron on 127.0.0.1 skips pairing
+    pairing_code_ttl_seconds: int = 300
+    session_ttl_hours: int = 168  # 7 days
+    pairing_rate_limit_per_minute: int = 10
+    auth_rate_limit_per_minute: int = 60
+    notify_on_completion: bool = True
+    notify_on_failure: bool = True
+    notify_on_approval: bool = True
+    notify_on_reconciliation: bool = True
     model_config = SettingsConfigDict(env_file=".env", env_prefix="AI_TEAMMATES_", extra="ignore")
 
     @property

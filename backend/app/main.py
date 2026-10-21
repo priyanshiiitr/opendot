@@ -4,10 +4,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from .automations import AutomationService, AutomationWorker
 from .automations.service import AutomationError
@@ -46,7 +47,18 @@ from .schemas import (
     NotificationOut,
     SkillEnableIn,
     SkillInstallCreate,
+    DeviceOut,
+    DiagnosticsOut,
+    PairingCompleteIn,
+    PairingCompleteOut,
+    PairingStartOut,
+    RemoteStatusOut,
     SkillInstallOut,
+    TeamCreate,
+    TeamOut,
+    TeamRunCreate,
+    TeamRunOut,
+    TeamUpdate,
     TeammateCreate,
     TeammateOut,
     TelegramConfigureRequest,
@@ -54,7 +66,10 @@ from .schemas import (
     WorkflowCreate,
     WorkflowOut,
 )
+from .remote import RemoteAccessError, RemoteAccessService
+from .remote.access import authorize_request, client_ip, is_loopback
 from .skills import SkillError, SkillRegistry
+from .teams import TeamCoordinator, TeamError, TeamService
 from .tools import ToolRegistry
 from .workflows import WorkflowError, WorkflowService
 
@@ -90,6 +105,9 @@ connector_manager = ConnectorManager(credential_store, SessionLocal, registry)
 runtime = AgentRuntime(settings, registry, PermissionBroker(), computer_manager, memory_service)
 automation_service = AutomationService(settings)
 automation_worker = AutomationWorker(settings, SessionLocal, runtime, automation_service)
+team_service = TeamService(settings)
+team_coordinator = TeamCoordinator(settings, SessionLocal, runtime, team_service)
+remote_access = RemoteAccessService(settings)
 
 
 @asynccontextmanager
@@ -97,6 +115,8 @@ async def lifespan(_app: FastAPI):
     init_db()
     skill_registry.ensure_builtin_seeded()
     computer_manager.reconcile_on_startup()
+    with SessionLocal() as db:
+        team_coordinator.reconcile_on_startup(db)
     connector_manager.refresh_tools()
     await automation_worker.start()
     try:
@@ -106,8 +126,32 @@ async def lifespan(_app: FastAPI):
         await computer_manager.shutdown()
 
 
-app = FastAPI(title=settings.app_name, version="0.7.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=settings.allowed_origins, allow_methods=["*"], allow_headers=["*"])
+app = FastAPI(title=settings.app_name, version="0.9.0", lifespan=lifespan)
+# CORS: explicit origin allowlist only — never "*" with credentials.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.allowed_origins,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-AI-Teammates-Session"],
+)
+
+
+class RemoteAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        with SessionLocal() as db:
+            try:
+                session = authorize_request(request, db, settings, remote_access)
+                request.state.device_session = session
+            except HTTPException as exc:
+                return Response(
+                    content=json.dumps({"detail": exc.detail}),
+                    status_code=exc.status_code,
+                    media_type="application/json",
+                )
+        return await call_next(request)
+
+
+app.add_middleware(RemoteAuthMiddleware)
 app.include_router(build_webhook_router(settings, automation_service))
 
 
@@ -148,6 +192,25 @@ def health() -> HealthOut:
     return HealthOut(status="ok", provider=settings.model_provider)
 
 
+@app.get("/ready")
+def ready() -> dict:
+    """Readiness: process up and DB reachable. Does not imply browsers are open."""
+    try:
+        with SessionLocal() as db:
+            db.execute(__import__("sqlalchemy").text("SELECT 1"))
+        worker_ok = (not settings.automation_worker_enabled) or (automation_worker._task is not None and not automation_worker._task.done())
+        return {
+            "ready": True,
+            "database": True,
+            "worker_enabled": settings.automation_worker_enabled,
+            "worker_running": worker_ok,
+            "remote_access_enabled": settings.remote_access_enabled,
+            "bind_host": settings.bind_host,
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(503, f"Not ready: {exc}") from exc
+
+
 @app.get("/api/connectors", response_model=list[ConnectorStatusOut])
 def list_connectors() -> list[dict]:
     return connector_manager.list_statuses()
@@ -185,7 +248,13 @@ def list_teammates(db: Session = Depends(get_db)) -> list[Teammate]:
 
 @app.post("/api/teammates", response_model=TeammateOut)
 def create_teammate(request: TeammateCreate, db: Session = Depends(get_db)) -> Teammate:
-    teammate = Teammate(name=request.name.strip(), description=request.description.strip(), system_prompt=request.system_prompt.strip())
+    teammate = Teammate(
+        name=request.name.strip(),
+        description=request.description.strip(),
+        system_prompt=request.system_prompt.strip(),
+        role_label=request.role_label.strip(),
+        enabled=request.enabled,
+    )
     db.add(teammate)
     db.commit()
     db.refresh(teammate)
@@ -536,6 +605,7 @@ def list_notifications(unread_only: bool = False, db: Session = Depends(get_db))
             "title": n.title,
             "body": n.body,
             "automation_run_id": n.automation_run_id,
+            "link_ref": getattr(n, "link_ref", None),
             "read": n.read,
             "created_at": n.created_at,
         }
@@ -555,8 +625,122 @@ def read_notification(notification_id: str, db: Session = Depends(get_db)) -> di
         "title": n.title,
         "body": n.body,
         "automation_run_id": n.automation_run_id,
+        "link_ref": getattr(n, "link_ref", None),
         "read": n.read,
         "created_at": n.created_at,
+    }
+
+
+# --- Milestone 9: remote companion / always-on ops ---
+
+
+@app.get("/api/remote/status", response_model=RemoteStatusOut)
+def remote_status() -> dict:
+    enabled = settings.remote_access_enabled
+    return {
+        "remote_access_enabled": enabled,
+        "bind_host": settings.bind_host,
+        "bind_port": settings.bind_port,
+        "local_trust_loopback": settings.local_trust_loopback,
+        "pairing_available": enabled,
+        "message": (
+            "Remote access enabled. Pair devices with a short-lived code. Private network (e.g. Tailscale) recommended."
+            if enabled
+            else "Remote access disabled (default). Backend remains loopback-oriented; enable explicitly to pair devices."
+        ),
+    }
+
+
+@app.post("/api/remote/pairing/start", response_model=PairingStartOut)
+def pairing_start(request: Request, db: Session = Depends(get_db)) -> dict:
+    if not is_loopback(request):
+        raise HTTPException(403, "Pairing must be started from the trusted local desktop (loopback).")
+    try:
+        return remote_access.start_pairing(db, client_key=client_ip(request))
+    except RemoteAccessError as exc:
+        raise HTTPException(exc.status_code, exc.reason) from exc
+
+
+@app.post("/api/remote/pairing/complete", response_model=PairingCompleteOut)
+def pairing_complete(body: PairingCompleteIn, request: Request, db: Session = Depends(get_db)) -> dict:
+    try:
+        return remote_access.complete_pairing(
+            db, code=body.code, device_name=body.device_name, client_key=client_ip(request)
+        )
+    except RemoteAccessError as exc:
+        raise HTTPException(exc.status_code, exc.reason) from exc
+
+
+@app.get("/api/remote/devices", response_model=list[DeviceOut])
+def list_devices(db: Session = Depends(get_db)) -> list[dict]:
+    return remote_access.list_devices(db)
+
+
+@app.delete("/api/remote/devices/{session_id}")
+def revoke_device(session_id: str, db: Session = Depends(get_db)) -> dict[str, bool]:
+    try:
+        remote_access.revoke_device(db, session_id)
+    except RemoteAccessError as exc:
+        raise HTTPException(exc.status_code, exc.reason) from exc
+    return {"revoked": True}
+
+
+@app.post("/api/remote/logout")
+def remote_logout(request: Request, db: Session = Depends(get_db)) -> dict[str, bool]:
+    session = getattr(request.state, "device_session", None)
+    if session is None:
+        # Also accept bearer for logout when loopback trust skipped session attachment
+        from .remote.access import extract_bearer
+
+        session = remote_access.resolve_session(db, extract_bearer(request))
+    if session is None:
+        raise HTTPException(401, "No active session.")
+    remote_access.logout(db, session)
+    return {"logged_out": True}
+
+
+@app.get("/api/diagnostics", response_model=DiagnosticsOut)
+def diagnostics(db: Session = Depends(get_db)) -> dict:
+    from .database import AutomationRun, ComputerRecord, DeviceSession, ExecutionEvent, SecurityAuditEvent
+
+    waiting = (
+        db.query(ExecutionEvent)
+        .filter(ExecutionEvent.event_type == "approval", ExecutionEvent.status == "waiting_approval")
+        .count()
+    )
+    active = db.query(AutomationRun).filter(AutomationRun.status.in_(["queued", "running", "waiting_approval"])).count()
+    devices = db.query(DeviceSession).filter(DeviceSession.revoked.is_(False)).count()
+    computers = db.query(ComputerRecord).filter(ComputerRecord.state.in_(["ready", "busy", "waiting_human"])).count()
+    events = (
+        db.query(SecurityAuditEvent).order_by(SecurityAuditEvent.created_at.desc()).limit(15).all()
+    )
+    worker_running = (not settings.automation_worker_enabled) or (
+        automation_worker._task is not None and not automation_worker._task.done()
+    )
+    notes = [
+        "Closing the Electron window does not stop this backend process.",
+        "Jobs do not run when the host PC is powered off.",
+        "A DB computer row does not prove the browser process is alive.",
+        "Remote access defaults to disabled; private VPN (e.g. Tailscale) is the documented path when enabled.",
+    ]
+    if settings.remote_access_enabled and settings.bind_host == "127.0.0.1":
+        notes.append("Remote access is enabled but bind_host is still 127.0.0.1 — companions on other devices cannot reach it until you bind a private interface intentionally.")
+    return {
+        "status": "ok",
+        "provider": settings.model_provider,
+        "remote_access_enabled": settings.remote_access_enabled,
+        "worker_enabled": settings.automation_worker_enabled,
+        "worker_running": bool(worker_running),
+        "bind_host": settings.bind_host,
+        "active_automation_runs": active,
+        "waiting_approvals": waiting,
+        "paired_devices": devices,
+        "browser_computers_ready": computers,
+        "recent_security_events": [
+            {"id": e.id, "event_type": e.event_type, "detail": e.detail, "created_at": e.created_at}
+            for e in events
+        ],
+        "notes": notes,
     }
 
 
@@ -850,6 +1034,83 @@ def advance_workflow(
             runtime.set_skill_categories(previous_categories)
     except WorkflowError as exc:
         raise HTTPException(400, exc.reason) from exc
+
+
+# --- Milestone 8: multi-agent teams ---
+
+
+@app.get("/api/teams", response_model=list[TeamOut])
+def list_teams(db: Session = Depends(get_db)) -> list[dict]:
+    return [team_service.public_team(t) for t in team_service.list_teams(db)]
+
+
+@app.post("/api/teams", response_model=TeamOut)
+def create_team(request: TeamCreate, db: Session = Depends(get_db)) -> dict:
+    try:
+        team = team_service.create_team(db, request.model_dump())
+    except TeamError as exc:
+        raise HTTPException(400, exc.reason) from exc
+    return team_service.public_team(team)
+
+
+@app.get("/api/teams/{team_id}", response_model=TeamOut)
+def get_team(team_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return team_service.public_team(team_service.get_team(db, team_id))
+    except TeamError as exc:
+        raise HTTPException(404, exc.reason) from exc
+
+
+@app.patch("/api/teams/{team_id}", response_model=TeamOut)
+def patch_team(team_id: str, request: TeamUpdate, db: Session = Depends(get_db)) -> dict:
+    try:
+        team = team_service.update_team(db, team_id, request.model_dump(exclude_unset=True))
+    except TeamError as exc:
+        raise HTTPException(400, exc.reason) from exc
+    return team_service.public_team(team)
+
+
+@app.get("/api/team-runs", response_model=list[TeamRunOut])
+def list_team_runs(team_id: str | None = None, db: Session = Depends(get_db)) -> list[dict]:
+    return [team_service.public_run(db, r) for r in team_service.list_runs(db, team_id)]
+
+
+@app.post("/api/teams/{team_id}/runs", response_model=TeamRunOut)
+def create_team_run(team_id: str, request: TeamRunCreate, db: Session = Depends(get_db)) -> dict:
+    try:
+        run = team_service.create_run(
+            db,
+            team_id=team_id,
+            objective=request.objective,
+            subtasks=[s.model_dump() for s in request.subtasks],
+        )
+    except TeamError as exc:
+        raise HTTPException(400, exc.reason) from exc
+    return team_service.public_run(db, run)
+
+
+@app.get("/api/team-runs/{run_id}", response_model=TeamRunOut)
+def get_team_run(run_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return team_service.public_run(db, team_service.get_run(db, run_id))
+    except TeamError as exc:
+        raise HTTPException(404, exc.reason) from exc
+
+
+@app.post("/api/team-runs/{run_id}/tick", response_model=TeamRunOut)
+async def tick_team_run(run_id: str, max_steps: int | None = None) -> dict:
+    try:
+        return await team_coordinator.tick(run_id, max_steps=max_steps)
+    except TeamError as exc:
+        raise HTTPException(400, exc.reason) from exc
+
+
+@app.post("/api/team-runs/{run_id}/cancel", response_model=TeamRunOut)
+def cancel_team_run(run_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return team_service.public_run(db, team_service.cancel_run(db, run_id))
+    except TeamError as exc:
+        raise HTTPException(404, exc.reason) from exc
 
 
 def use_test_connectors(store: InMemoryCredentialStore | None = None) -> ConnectorManager:

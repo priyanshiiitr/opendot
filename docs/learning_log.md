@@ -55,3 +55,21 @@ User: “research startups” → Mock emits `browser_open` → `NavigationPolic
 - **Grants fail closed when present:** no grant keeps legacy Telegram rules; a grant without `telegram_send_message` denies send.
 - **Workflows verify artifacts:** success requires expected files/sections, not fluent final answers. Safe tools may retry; consequential uncertain steps need reconciliation.
 - **Interview framing:** four subsystems (memory / skills / permissions / workflows) compose; none may elevate another via natural language.
+
+## Milestone 8
+
+- **Role-play ≠ multi-agent:** one model pretending five personas is not delegation. We persist parent/child tasks and run each assignee through `AgentRuntime`.
+- **Validate before schedule:** the model may propose a plan; cycles, depth, and unauthorized assignees die in `validate_plan`.
+- **Fresh context:** specialists get a new conversation + dependency JSON — not the lead’s full private thread.
+- **Permissions don’t inherit upward:** categories may only restrict; connector grants still fail closed.
+- **Bounded concurrency:** `max_concurrent` caps in-flight work; one runtime lock keeps ContextVars honest.
+- **Honest finals:** missing artifacts or failed critical subtasks prevent a green “completed” status.
+
+## Milestone 9
+
+- **Service vs window:** Electron is a client; the agent service is uvicorn. Closing the UI must not kill the worker.
+- **Remote is opt-in:** private VPN + explicit flag; loopback trust keeps desktop DX while phones need pairing.
+- **Hash secrets:** pairing codes and session tokens are shown once; DB stores SHA-256 digests.
+- **Auth ≠ approval:** a paired phone can *request* approve/reject; PermissionBroker still binds the exact pending operation.
+- **Network errors ≠ task failure:** companion shows disconnect messages without marking host jobs done.
+- **No silent startup installs:** user-level Startup shortcut only if they run the register script.

@@ -166,3 +166,93 @@ Use these answers only for features that exist in this repository. Do not claim 
 
 55. **How do you test autonomous workflows offline?**
     Pytest creates workflows, advances steps, writes fixture artifacts via `WorkspaceStore`, and asserts verification/failure without calling paid providers or real Telegram.
+
+56. **Single-agent vs multi-agent?**
+    Single-agent: one runtime loop finishes the task. Multi-agent: a coordinator assigns validated subtasks to distinct teammate profiles, each with its own conversation and limits — not one prompt with five hats.
+
+57. **How does task orchestration work here?**
+    `TeamCoordinator` loads ready subtasks (deps satisfied), runs them via `AgentRuntime`, records structured results/events, then finalizes when nothing remains pending/running.
+
+58. **Dependency graphs?**
+    Explicit `depends_on` keys; backend rejects unknown IDs and cycles before insert. Dependents stay blocked if a prerequisite fails.
+
+59. **Parallel execution and concurrency limits?**
+    `max_concurrent` caps how many ready subtasks start together. Model/tool turns serialize on a shared runtime lock to protect ContextVars.
+
+60. **Structured agent communication?**
+    Subtasks receive objective + dependency JSON; they return findings/artifacts/status in `result_json`. Peer text is data, not policy.
+
+61. **Shared context vs private memory?**
+    Team artifacts live under `team_artifacts/<run_id>/`. Teammate-scoped memories stay isolated unless retrieval rules include them — specialists do not read others’ private chats.
+
+62. **Delegated permissions?**
+    Assignees get an explicit category allow-list for that subtask. Delegation cannot add Telegram/connectors or another teammate’s computer.
+
+63. **Bounded recursion?**
+    `max_depth` defaults to 1: specialists complete work; they cannot spawn nested team plans. Retries consume the same budget.
+
+64. **Failure propagation?**
+    Failed prerequisites mark dependents failed/blocked. Critical failures make the parent run `failed` even if some siblings succeeded (partial results still appear in the report).
+
+65. **Checkpointing and recovery?**
+    Subtask/parent statuses persist in SQLite. Restart marks in-flight `running` work `needs_reconciliation` instead of blind replay.
+
+66. **Idempotency / duplicates?**
+    Completed subtasks are not re-executed on later ticks. Consequential uncertain failures use reconciliation rather than automatic retry.
+
+67. **Result verification?**
+    Finalization checks findings exist and artifact files are on disk. Fluent assistant text alone is not enough for a green parent status.
+
+68. **Cost control?**
+    Caps on subtasks, total runs, concurrency, depth, and retries. Tests use the mock provider — no paid calls.
+
+69. **Partial-success semantics?**
+    Report fields list completed, failed, verified, and unverified work. `honest_status` may be `partial`/`failed` while preserving successful sibling outputs.
+
+70. **How do you evaluate multi-agent systems?**
+    Assert plan validation, assignment boundaries, dependency order, structured results, permission non-escalation, cancellation, restart recovery, and final-report honesty — separately from live model quality.
+
+71. **Why separate the agent service from the desktop UI?**
+    Durable jobs and schedules need a process that outlives a renderer. Electron becomes a client of FastAPI; closing a window must not cancel healthy background work.
+
+72. **How do you run always-on on a personal Windows PC?**
+    Start uvicorn via script; optional current-user Startup shortcut. Not a SYSTEM service. Jobs still require the PC to be powered on.
+
+73. **How does device pairing work?**
+    Owner starts a short-lived code on loopback; companion redeems it for a session token. Codes/tokens are hashed at rest, single-use, rate-limited, and revocable.
+
+74. **Session revocation?**
+    Mark `DeviceSession.revoked`; subsequent bearer checks fail closed. Logout does the same for the current session.
+
+75. **Tokens vs cookies here?**
+    Companion uses a bearer/session header from `sessionStorage` (not URL/query). Cookie CSRF is avoided by not using cookie auth for the API in this milestone.
+
+76. **CSRF / CORS posture?**
+    Explicit origin allowlist (no `*` with credentials). State-changing APIs expect JSON + session header from allowed origins.
+
+77. **Authorization vs authentication?**
+    AuthN proves the paired device; AuthZ (PermissionBroker + grants) still decides each tool. Pairing never expands filesystem/secret access.
+
+78. **Why not public FastAPI by default?**
+    The app can drive browsers and connectors. Default bind is loopback; remote requires an explicit flag and preferably a private VPN.
+
+79. **Push notifications?**
+    In-app notifications are first-class. Web Push needs secure context/TLS and is not claimed for plain HTTP LAN origins in M9.
+
+80. **SSE after reconnect?**
+    Clients re-fetch authoritative run/receipt state after reconnect. A dropped stream is not success or cancellation.
+
+81. **Durable tasks vs UI lifecycle?**
+    AutomationRuns live in SQLite with a worker lease. UI disconnect does not rewrite run status.
+
+82. **Recovery semantics on service restart?**
+    Worker reconciles interrupted runs (`needs_reconciliation` for uncertain consequential tools). Approvals waiting stay waiting.
+
+83. **Audit logs?**
+    Security events record pairing/revoke/failures without storing codes or tokens. Retention is table-backed and inspectable in Ops.
+
+84. **How would you explain secure remote access in an interview?**
+    Least privilege exposure (loopback default), challenge-response pairing, hashed credentials, fail-closed revocation, private network path, and never confusing “device logged in” with “user approved this Telegram send.”
+
+85. **What remains unsafe to claim?**
+    Always-on when the PC is off, automatic public tunnels, Web Push on insecure HTTP, or remote shell/OS control — none of those are M9.

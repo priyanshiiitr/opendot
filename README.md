@@ -1,6 +1,6 @@
 # AI Teammates
 
-Local-first desktop AI teammate with a bounded agent loop, Playwright browser tools, a **Telegram Bot API connector**, a **durable Automations** worker (Milestone 5), **per-teammate persistent computers** (Milestone 6), and **persistent memory, versioned skills, scoped connector grants, and multi-step workflows** (Milestone 7).
+Local-first desktop AI teammate with a bounded agent loop, Playwright browser tools, connectors, durable automations, per-teammate computers, memory/skills/workflows, multi-agent teams, and an optional **always-on service + paired mobile companion** (Milestone 9).
 
 ## Prerequisites
 
@@ -45,6 +45,47 @@ cd ..
 npm test
 npm run build
 ```
+
+## Milestone 9 — Always-on service & companion
+
+The backend already hosts the durable worker. Run it **without Electron**:
+
+```powershell
+.\scripts\start-backend.ps1
+```
+
+Optional **current-user** Startup shortcut (never installed silently; not SYSTEM):
+
+```powershell
+.\scripts\register-user-startup.ps1          # enable
+.\scripts\register-user-startup.ps1 -Remove  # disable
+```
+
+- Closing the desktop window does **not** cancel healthy background jobs.
+- Jobs do **not** run when the PC is powered off.
+- Remote access defaults to **disabled** (`AI_TEAMMATES_REMOTE_ACCESS_ENABLED=false`, bind `127.0.0.1`).
+
+### Pair a phone (private network)
+
+1. Put phone and PC on the same private VPN (e.g. Tailscale).
+2. Set `AI_TEAMMATES_REMOTE_ACCESS_ENABLED=true` and bind to the private interface if needed (`AI_TEAMMATES_BIND_HOST`).
+3. Add the companion origin to `AI_TEAMMATES_CORS_ORIGINS`.
+4. Desktop → **Ops** → Generate pairing code.
+5. Phone browser → open the UI → **Companion** → enter code (session token stored in `sessionStorage`).
+6. Revoke anytime from **Ops**.
+
+See ADR `docs/decisions/0011-always-on-remote-companion.md`. Web Push is not enabled in this milestone.
+
+## Milestone 8 — Multi-agent teams
+
+1. Create specialist teammates (Chat sidebar or API) with distinct role labels.
+2. Sidebar → **Teams** → create a team (lead + member ids), limits default to `max_depth=1` (no recursive re-delegation).
+3. Start a research→report plan; **Tick coordinator** runs ready subtasks through the real `AgentRuntime` (mock provider offline).
+4. Inspect subtask statuses, structured results, coordination events, and the final report path under `data/team_artifacts/<run_id>/`.
+
+Delegation never expands permissions. Plans with cycles, unknown deps, or unauthorized assignees are rejected.
+
+See ADR `docs/decisions/0010-multi-agent-team-coordinator.md`.
 
 ## Milestone 7 — Memory, skills, grants, workflows
 
@@ -105,4 +146,6 @@ Open **Automations** in the sidebar.
 - `docs/decisions/0007-durable-automations-sqlite-worker.md`
 - `docs/decisions/0008-per-teammate-local-browser-computers.md`
 - `docs/decisions/0009-memory-skills-scoped-permissions-workflows.md`
+- `docs/decisions/0010-multi-agent-team-coordinator.md`
+- `docs/decisions/0011-always-on-remote-companion.md`
 - `docs/interview_guide.md`

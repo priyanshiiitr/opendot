@@ -7,6 +7,8 @@ class TeammateOut(BaseModel):
     id: int
     name: str
     description: str
+    enabled: bool = True
+    role_label: str = ""
 
 
 class TeammateCreate(BaseModel):
@@ -16,6 +18,8 @@ class TeammateCreate(BaseModel):
         default="You are a helpful AI teammate with your own isolated computer and workspace.",
         max_length=8_000,
     )
+    role_label: str = Field(default="", max_length=80)
+    enabled: bool = True
 
 
 class ComputerStatusOut(BaseModel):
@@ -193,8 +197,63 @@ class NotificationOut(BaseModel):
     title: str
     body: str
     automation_run_id: str | None
+    link_ref: str | None = None
     read: bool
     created_at: datetime
+
+
+class PairingStartOut(BaseModel):
+    challenge_id: str
+    code: str
+    expires_at: datetime
+    ttl_seconds: int
+    message: str
+
+
+class PairingCompleteIn(BaseModel):
+    code: str = Field(min_length=6, max_length=32)
+    device_name: str = Field(default="companion", max_length=120)
+
+
+class PairingCompleteOut(BaseModel):
+    session_id: str
+    device_name: str
+    token: str
+    expires_at: datetime
+    message: str
+
+
+class DeviceOut(BaseModel):
+    id: str
+    device_name: str
+    revoked: bool
+    expires_at: datetime
+    last_seen_at: datetime | None
+    created_at: datetime
+
+
+class RemoteStatusOut(BaseModel):
+    remote_access_enabled: bool
+    bind_host: str
+    bind_port: int
+    local_trust_loopback: bool
+    pairing_available: bool
+    message: str
+
+
+class DiagnosticsOut(BaseModel):
+    status: str
+    provider: str
+    remote_access_enabled: bool
+    worker_enabled: bool
+    worker_running: bool
+    bind_host: str
+    active_automation_runs: int
+    waiting_approvals: int
+    paired_devices: int
+    browser_computers_ready: int
+    recent_security_events: list[dict[str, Any]] = []
+    notes: list[str] = []
 
 
 class WebhookCreateOut(BaseModel):
@@ -312,6 +371,81 @@ class WorkflowOut(BaseModel):
     memory_ids: list[str] = []
     report: dict[str, Any] = {}
     steps: list[dict[str, Any]] = []
+    created_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None = None
+
+
+class TeamCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2000)
+    lead_teammate_id: int
+    member_ids: list[int] = Field(default_factory=list)
+    enabled: bool = True
+    max_subtasks: int | None = None
+    max_concurrent: int | None = None
+    max_depth: int | None = None
+    max_retries: int | None = None
+    max_total_runs: int | None = None
+
+
+class TeamUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    enabled: bool | None = None
+    member_ids: list[int] | None = None
+    max_subtasks: int | None = None
+    max_concurrent: int | None = None
+    max_depth: int | None = None
+    max_retries: int | None = None
+    max_total_runs: int | None = None
+
+
+class TeamOut(BaseModel):
+    id: str
+    name: str
+    description: str
+    lead_teammate_id: int
+    member_ids: list[int]
+    enabled: bool
+    max_subtasks: int
+    max_concurrent: int
+    max_depth: int
+    max_retries: int
+    max_total_runs: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class TeamSubtaskIn(BaseModel):
+    subtask_key: str = Field(min_length=1, max_length=80)
+    assignee_teammate_id: int
+    objective: str = Field(min_length=1, max_length=20_000)
+    output_format: str = "structured_findings"
+    depends_on: list[str] = Field(default_factory=list)
+    depth: int = 1
+    critical: bool = True
+    allowed_tool_categories: list[str] = Field(default_factory=lambda: ["local", "workspace"])
+
+
+class TeamRunCreate(BaseModel):
+    objective: str = Field(min_length=1, max_length=20_000)
+    subtasks: list[TeamSubtaskIn]
+
+
+class TeamRunOut(BaseModel):
+    id: str
+    team_id: str
+    lead_teammate_id: int
+    objective: str
+    status: str
+    cancelled: bool
+    plan: dict[str, Any] = {}
+    report: dict[str, Any] = {}
+    shared_artifact_dir: str = ""
+    error_message: str | None = None
+    subtasks: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
     created_at: datetime
     updated_at: datetime
     finished_at: datetime | None = None

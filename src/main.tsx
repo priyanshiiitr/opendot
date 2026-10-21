@@ -10,20 +10,27 @@ import {
   ConnectorGrant,
   ConnectorStatus,
   Conversation,
+  Diagnostics,
   ExecutionEvent,
+  getSessionToken,
   isSuccessfulTerminal,
   MemoryRecord,
   Message,
+  PairedDevice,
+  RemoteStatus,
+  setSessionToken,
   SkillInstall,
   SkillPackage,
   StreamEvent,
+  Team,
+  TeamRunOut,
   Teammate,
   toActivity,
   WorkflowRun,
 } from './api'
 import './styles.css'
 
-type View = 'chat' | 'automations' | 'computer' | 'memory' | 'skills' | 'workflows'
+type View = 'chat' | 'automations' | 'computer' | 'memory' | 'skills' | 'workflows' | 'teams' | 'companion' | 'ops'
 
 function Activity({
   events,
@@ -572,6 +579,473 @@ function SkillsPanel({
               <pre className="auto-secret">{selected.instructions_md.slice(0, 4000)}</pre>
               <small>Categories: {selected.allowed_tool_categories.join(', ')}</small>
             </div>
+          )}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function OpsPanel({ onError }: { onError: (msg: string) => void }) {
+  const [diag, setDiag] = useState<Diagnostics | null>(null)
+  const [remote, setRemote] = useState<RemoteStatus | null>(null)
+  const [devices, setDevices] = useState<PairedDevice[]>([])
+  const [pairCode, setPairCode] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  async function refresh() {
+    const [d, r, dev] = await Promise.all([api.diagnostics(), api.remoteStatus(), api.devices().catch(() => [])])
+    setDiag(d)
+    setRemote(r)
+    setDevices(dev)
+  }
+
+  useEffect(() => {
+    refresh().catch((e) => onError(e instanceof Error ? e.message : 'Diagnostics failed'))
+  }, [])
+
+  return (
+    <section className="m7-panel">
+      <p className="auto-instruction">
+        Service health is independent of the Electron window. Remote access stays off until you enable it in{' '}
+        <code>.env</code>. Pairing codes are short-lived; tokens are shown once and stored as hashes.
+      </p>
+      <div className="m7-grid">
+        <div className="auto-list">
+          <h3>Service</h3>
+          {diag && (
+            <pre className="auto-secret">
+              {JSON.stringify(
+                {
+                  worker_running: diag.worker_running,
+                  active_runs: diag.active_automation_runs,
+                  waiting_approvals: diag.waiting_approvals,
+                  bind_host: diag.bind_host,
+                  remote: diag.remote_access_enabled,
+                },
+                null,
+                2,
+              )}
+            </pre>
+          )}
+          {diag?.notes?.map((n) => (
+            <p className="auto-instruction" key={n}>
+              {n}
+            </p>
+          ))}
+          <h3>Start pairing (desktop)</h3>
+          <button
+            disabled={busy || !remote?.remote_access_enabled}
+            onClick={() => {
+              setBusy(true)
+              void api
+                .startPairing()
+                .then((p) => {
+                  setPairCode(p.code)
+                  return refresh()
+                })
+                .catch((e) => onError(e instanceof Error ? e.message : 'Pairing start failed'))
+                .finally(() => setBusy(false))
+            }}
+          >
+            Generate pairing code
+          </button>
+          {pairCode && <pre className="auto-secret">Code (once): {pairCode}</pre>}
+          {!remote?.remote_access_enabled && (
+            <p className="connection-warn">Set AI_TEAMMATES_REMOTE_ACCESS_ENABLED=true to pair devices.</p>
+          )}
+        </div>
+        <div>
+          <h3>Paired devices</h3>
+          {devices.map((d) => (
+            <div className={`run-row ${d.revoked ? 'failed' : ''}`} key={d.id}>
+              <strong>{d.device_name}</strong>
+              <small>{d.revoked ? 'revoked' : 'active'}</small>
+              {!d.revoked && (
+                <button
+                  className="run-cancel"
+                  onClick={() =>
+                    void api
+                      .revokeDevice(d.id)
+                      .then(refresh)
+                      .catch((e) => onError(e instanceof Error ? e.message : 'Revoke failed'))
+                  }
+                >
+                  Revoke
+                </button>
+              )}
+            </div>
+          ))}
+          <h3 style={{ marginTop: 16 }}>Security events</h3>
+          <pre className="auto-secret">
+            {(diag?.recent_security_events || []).map((e) => `${e.event_type}: ${e.detail}`).join('\n') || '(none)'}
+          </pre>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function CompanionPanel({
+  teammates,
+  onError,
+}: {
+  teammates: Teammate[]
+  onError: (msg: string) => void
+}) {
+  const [hasSession, setHasSession] = useState(!!getSessionToken())
+  const [code, setCode] = useState('')
+  const [deviceName, setDeviceName] = useState('Phone')
+  const [runs, setRuns] = useState<AutomationRun[]>([])
+  const [teamRuns, setTeamRuns] = useState<TeamRunOut[]>([])
+  const [notes, setNotes] = useState<AppNotification[]>([])
+  const [remote, setRemote] = useState<RemoteStatus | null>(null)
+  const [selectedRun, setSelectedRun] = useState<AutomationRunReceipt | null>(null)
+  const [netError, setNetError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  async function refresh() {
+    setNetError('')
+    try {
+      setRemote(await api.remoteStatus())
+      setRuns(await api.allAutomationRuns())
+      setTeamRuns(await api.teamRuns())
+      setNotes(await api.notifications(true))
+    } catch (e) {
+      setNetError(e instanceof Error ? e.message : 'Network error — task state may still be running on the host')
+    }
+  }
+
+  useEffect(() => {
+    void refresh()
+    const t = window.setInterval(() => void refresh(), 8000)
+    return () => window.clearInterval(t)
+  }, [hasSession])
+
+  async function pair() {
+    setBusy(true)
+    try {
+      const done = await api.completePairing(code.trim(), deviceName.trim() || 'Phone')
+      setSessionToken(done.token)
+      setHasSession(true)
+      setCode('')
+      await refresh()
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Pairing failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="companion">
+      <p className="auto-instruction">
+        Mobile companion: supervise tasks and approvals. Disconnecting does not cancel host jobs. Pairing never
+        auto-approves tools.
+      </p>
+      {netError && <div className="error">{netError}</div>}
+      {!hasSession && remote?.remote_access_enabled && (
+        <div className="auto-list" style={{ marginBottom: 20 }}>
+          <label>
+            Device name
+            <input value={deviceName} onChange={(e) => setDeviceName(e.target.value)} />
+          </label>
+          <label>
+            Pairing code
+            <input value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="From desktop Ops" />
+          </label>
+          <button disabled={busy || code.length < 6} onClick={() => void pair()}>
+            Pair this device
+          </button>
+        </div>
+      )}
+      {hasSession && (
+        <button
+          className="reject"
+          onClick={() => {
+            void api.logoutRemote().catch(() => undefined)
+            setSessionToken(null)
+            setHasSession(false)
+          }}
+        >
+          Log out session
+        </button>
+      )}
+      <h3>Unread notifications</h3>
+      {notes.map((n) => (
+        <div className="run-row" key={n.id}>
+          <strong>{n.title}</strong>
+          <small>{n.kind}</small>
+          <p className="auto-instruction" style={{ width: '100%' }}>
+            {n.body}
+          </p>
+          <button onClick={() => void api.readNotification(n.id).then(refresh)}>Mark read</button>
+        </div>
+      ))}
+      {!notes.length && <p className="auto-instruction">No unread notifications.</p>}
+      <h3>Automation runs</h3>
+      {runs.slice(0, 12).map((r) => (
+        <button
+          key={r.id}
+          className={`run-row ${r.status}`}
+          onClick={() =>
+            void api
+              .automationRun(r.id)
+              .then(setSelectedRun)
+              .catch((e) => onError(e instanceof Error ? e.message : 'Load failed'))
+          }
+        >
+          <strong>{r.status}</strong>
+          <small>{r.trigger_type}</small>
+        </button>
+      ))}
+      <h3>Team runs</h3>
+      {teamRuns.slice(0, 8).map((r) => (
+        <div className={`run-row ${r.status}`} key={r.id}>
+          <strong>{r.status}</strong>
+          <small>{r.objective.slice(0, 60)}</small>
+          {r.status !== 'cancelled' && r.status !== 'completed' && (
+            <button className="run-cancel" onClick={() => void api.cancelTeamRun(r.id).then(refresh)}>
+              Cancel
+            </button>
+          )}
+        </div>
+      ))}
+      {selectedRun && (
+        <div className="receipt">
+          <h3>Run receipt</h3>
+          <pre className="auto-secret">{JSON.stringify({ status: selectedRun.run.status, progress: selectedRun.progress }, null, 2)}</pre>
+          <Activity
+            events={selectedRun.events.filter((e) => e.event_type === 'approval' && e.status === 'waiting_approval')}
+            decide={(id, decision) => {
+              void api
+                .decideAutomationApproval(selectedRun.run.id, id, decision)
+                .then(() => api.automationRun(selectedRun.run.id))
+                .then(setSelectedRun)
+                .then(refresh)
+                .catch((e) => onError(e instanceof Error ? e.message : 'Approval failed'))
+            }}
+          />
+          <button onClick={() => void api.cancelAutomationRun(selectedRun.run.id).then(refresh)}>Cancel run</button>
+        </div>
+      )}
+      <p className="auto-instruction">Teammates on host: {teammates.map((t) => t.name).join(', ') || '—'}</p>
+    </section>
+  )
+}
+
+function TeamsPanel({
+  teammates,
+  onError,
+}: {
+  teammates: Teammate[]
+  onError: (msg: string) => void
+}) {
+  const [teams, setTeams] = useState<Team[]>([])
+  const [runs, setRuns] = useState<TeamRunOut[]>([])
+  const [selected, setSelected] = useState<TeamRunOut | null>(null)
+  const [teamId, setTeamId] = useState('')
+  const [name, setName] = useState('Research squad')
+  const [leadId, setLeadId] = useState<number | ''>('')
+  const [memberIds, setMemberIds] = useState('')
+  const [objective, setObjective] = useState('Research then summarize two AI startups.')
+  const [busy, setBusy] = useState(false)
+
+  async function refresh() {
+    const [t, r] = await Promise.all([api.teams(), api.teamRuns()])
+    setTeams(t)
+    setRuns(r)
+    if (!teamId && t[0]) setTeamId(t[0].id)
+    if (!leadId && teammates[0]) setLeadId(teammates[0].id)
+  }
+
+  useEffect(() => {
+    refresh().catch((e) => onError(e instanceof Error ? e.message : 'Failed to load teams'))
+  }, [teammates.length])
+
+  async function createTeam() {
+    if (!leadId) return
+    setBusy(true)
+    try {
+      const members = memberIds
+        .split(/[,\s]+/)
+        .map((x) => Number(x))
+        .filter((n) => Number.isFinite(n))
+      await api.createTeam({
+        name,
+        lead_teammate_id: Number(leadId),
+        member_ids: members.length ? members : [Number(leadId)],
+        max_concurrent: 1,
+        max_depth: 1,
+      })
+      await refresh()
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Create team failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function startRun() {
+    if (!teamId) return
+    const team = teams.find((t) => t.id === teamId)
+    if (!team) return
+    const research = team.member_ids.find((id) => id !== team.lead_teammate_id) || team.member_ids[0]
+    const report = team.lead_teammate_id
+    setBusy(true)
+    try {
+      const run = await api.createTeamRun(teamId, {
+        objective,
+        subtasks: [
+          {
+            subtask_key: 'research',
+            assignee_teammate_id: research,
+            objective: 'Produce a short research note with two candidate names.',
+            allowed_tool_categories: ['local', 'workspace'],
+          },
+          {
+            subtask_key: 'report',
+            assignee_teammate_id: report,
+            objective: 'Compile a short final shortlist from prior research results.',
+            depends_on: ['research'],
+            allowed_tool_categories: ['local', 'workspace'],
+          },
+        ],
+      })
+      setSelected(run)
+      await refresh()
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Create run failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="m7-panel">
+      <p className="auto-instruction">
+        Multi-agent runs use a bounded coordinator. Plans are validated before work starts. Specialists get fresh
+        conversations and least-privilege tool categories — delegation does not expand permissions. Nested
+        re-delegation is disabled by default (max_depth=1).
+      </p>
+      <div className="m7-grid">
+        <div className="auto-list">
+          <h3>Create team</h3>
+          <label>
+            Name
+            <input value={name} onChange={(e) => setName(e.target.value)} />
+          </label>
+          <label>
+            Lead
+            <select value={leadId} onChange={(e) => setLeadId(Number(e.target.value))}>
+              {teammates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name} ({t.id})
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Member ids
+            <input
+              value={memberIds}
+              onChange={(e) => setMemberIds(e.target.value)}
+              placeholder="1, 2, 3"
+            />
+          </label>
+          <button disabled={busy} onClick={() => void createTeam()}>
+            Save team
+          </button>
+          <h3 style={{ marginTop: 20 }}>Start run</h3>
+          <label>
+            Team
+            <select value={teamId} onChange={(e) => setTeamId(e.target.value)}>
+              {teams.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Objective
+            <textarea value={objective} onChange={(e) => setObjective(e.target.value)} rows={3} />
+          </label>
+          <button disabled={busy || !teamId} onClick={() => void startRun()}>
+            Create research→report plan
+          </button>
+          <h3 style={{ marginTop: 20 }}>Runs</h3>
+          {runs.map((r) => (
+            <button key={r.id} className={`run-row ${r.status}`} onClick={() => setSelected(r)}>
+              <strong>{r.status}</strong>
+              <small>{r.objective.slice(0, 80)}</small>
+            </button>
+          ))}
+        </div>
+        <div>
+          {selected ? (
+            <div className="receipt">
+              <h2>Team run</h2>
+              <p className="auto-instruction">{selected.objective}</p>
+              <small>Status: {selected.status}</small>
+              <div className="connection-actions">
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    void api
+                      .tickTeamRun(selected.id)
+                      .then((r) => {
+                        setSelected(r)
+                        return refresh()
+                      })
+                      .catch((e) => onError(e instanceof Error ? e.message : 'Tick failed'))
+                  }
+                >
+                  Tick coordinator
+                </button>
+                <button
+                  className="reject"
+                  disabled={busy}
+                  onClick={() =>
+                    void api
+                      .cancelTeamRun(selected.id)
+                      .then((r) => {
+                        setSelected(r)
+                        return refresh()
+                      })
+                      .catch((e) => onError(e instanceof Error ? e.message : 'Cancel failed'))
+                  }
+                >
+                  Cancel
+                </button>
+              </div>
+              {selected.subtasks.map((s) => (
+                <div className={`run-row ${s.status}`} key={s.id}>
+                  <strong>
+                    {s.subtask_key} → teammate {s.assignee_teammate_id} · {s.status}
+                  </strong>
+                  <small>
+                    deps: {(s.depends_on || []).join(', ') || '—'}
+                    {s.error_message ? ` · ${s.error_message}` : ''}
+                  </small>
+                  {s.result?.findings != null && (
+                    <p className="auto-instruction" style={{ width: '100%' }}>
+                      {String(s.result.findings).slice(0, 400)}
+                    </p>
+                  )}
+                </div>
+              ))}
+              {selected.events?.length > 0 && (
+                <pre className="auto-secret">
+                  {selected.events.map((e) => `${e.event_type}`).join('\n')}
+                </pre>
+              )}
+              {Object.keys(selected.report || {}).length > 0 && (
+                <pre className="auto-secret">{JSON.stringify(selected.report, null, 2)}</pre>
+              )}
+            </div>
+          ) : (
+            <p className="auto-instruction">Create a team and run to inspect subtasks and events.</p>
           )}
         </div>
       </div>
@@ -1170,6 +1644,27 @@ function App() {
             <small>steps · verify</small>
           </span>
         </button>
+        <button className={`teammate ${view === 'teams' ? 'active' : ''}`} onClick={() => setView('teams')}>
+          <span className="avatar">T</span>
+          <span>
+            <strong>Teams</strong>
+            <small>multi-agent</small>
+          </span>
+        </button>
+        <button className={`teammate ${view === 'companion' ? 'active' : ''}`} onClick={() => setView('companion')}>
+          <span className="avatar">☎</span>
+          <span>
+            <strong>Companion</strong>
+            <small>mobile supervise</small>
+          </span>
+        </button>
+        <button className={`teammate ${view === 'ops' ? 'active' : ''}`} onClick={() => setView('ops')}>
+          <span className="avatar">⚙</span>
+          <span>
+            <strong>Ops</strong>
+            <small>health · pairing</small>
+          </span>
+        </button>
         <ConnectionsPanel status={telegram} onChanged={setTelegram} />
         {notifications.length > 0 && (
           <div className="connections">
@@ -1307,6 +1802,48 @@ function App() {
             </header>
             {error && <div className="error">{error}</div>}
             <WorkflowsPanel teammate={selected ?? null} onError={setError} />
+          </>
+        ) : view === 'teams' ? (
+          <>
+            <header>
+              <div>
+                <p className="eyebrow">MULTI-AGENT COORDINATION</p>
+                <h1>Teams</h1>
+              </div>
+              <span className="status">
+                <i /> bounded delegation
+              </span>
+            </header>
+            {error && <div className="error">{error}</div>}
+            <TeamsPanel teammates={teammates} onError={setError} />
+          </>
+        ) : view === 'companion' ? (
+          <>
+            <header>
+              <div>
+                <p className="eyebrow">MOBILE COMPANION</p>
+                <h1>Supervise</h1>
+              </div>
+              <span className="status">
+                <i /> session ≠ task cancel
+              </span>
+            </header>
+            {error && <div className="error">{error}</div>}
+            <CompanionPanel teammates={teammates} onError={setError} />
+          </>
+        ) : view === 'ops' ? (
+          <>
+            <header>
+              <div>
+                <p className="eyebrow">ALWAYS-ON OPS</p>
+                <h1>Diagnostics</h1>
+              </div>
+              <span className="status">
+                <i /> service health
+              </span>
+            </header>
+            {error && <div className="error">{error}</div>}
+            <OpsPanel onError={setError} />
           </>
         ) : (
           <>

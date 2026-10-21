@@ -64,8 +64,14 @@ class AgentRuntime:
         if not tokens:
             return
         t, c, teammate_id = tokens
-        current_teammate_id.reset(t)
-        current_computer_id.reset(c)
+        try:
+            current_teammate_id.reset(t)
+        except ValueError:
+            pass  # generator closed across task/context boundaries
+        try:
+            current_computer_id.reset(c)
+        except ValueError:
+            pass
         if self.computer_manager is not None:
             self.computer_manager.mark_ready(teammate_id)
 

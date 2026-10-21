@@ -18,6 +18,8 @@ class Teammate(Base):
     name: Mapped[str] = mapped_column(String(100))
     description: Mapped[str] = mapped_column(String(500), default="")
     system_prompt: Mapped[str] = mapped_column(Text, default="You are a helpful AI teammate.")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    role_label: Mapped[str] = mapped_column(String(80), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="teammate", cascade="all, delete-orphan")
 
@@ -179,7 +181,41 @@ class AppNotification(Base):
     title: Mapped[str] = mapped_column(String(200))
     body: Mapped[str] = mapped_column(Text, default="")
     automation_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    link_ref: Mapped[str | None] = mapped_column(String(200), nullable=True)  # safe UI deep-link hint
     read: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class PairingChallenge(Base):
+    """Short-lived pairing code (store hash only after issuance)."""
+
+    __tablename__ = "pairing_challenges"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(128))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class DeviceSession(Base):
+    """Paired companion device session (token hash only)."""
+
+    __tablename__ = "device_sessions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    device_name: Mapped[str] = mapped_column(String(120), default="device")
+    token_hash: Mapped[str] = mapped_column(String(128))
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class SecurityAuditEvent(Base):
+    __tablename__ = "security_audit_events"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(80))
+    detail: Mapped[str] = mapped_column(Text, default="")  # never secrets
+    device_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -299,6 +335,83 @@ class WorkflowStep(Base):
     checkpoint_json: Mapped[str] = mapped_column(Text, default="{}")
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class Team(Base):
+    """Configurable roster: lead + authorized members (not a hardcoded five-agent cast)."""
+
+    __tablename__ = "teams"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text, default="")
+    lead_teammate_id: Mapped[int] = mapped_column(ForeignKey("teammates.id"))
+    member_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_subtasks: Mapped[int] = mapped_column(Integer, default=12)
+    max_concurrent: Mapped[int] = mapped_column(Integer, default=2)
+    max_depth: Mapped[int] = mapped_column(Integer, default=1)  # 1 = specialists cannot re-delegate
+    max_retries: Mapped[int] = mapped_column(Integer, default=1)
+    max_total_runs: Mapped[int] = mapped_column(Integer, default=20)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
+class TeamRun(Base):
+    """Parent collaborative execution — survives restart."""
+
+    __tablename__ = "team_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id"))
+    lead_teammate_id: Mapped[int] = mapped_column(ForeignKey("teammates.id"))
+    objective: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(40), default="pending")
+    cancelled: Mapped[bool] = mapped_column(Boolean, default=False)
+    plan_json: Mapped[str] = mapped_column(Text, default="{}")
+    report_json: Mapped[str] = mapped_column(Text, default="{}")
+    shared_artifact_dir: Mapped[str] = mapped_column(Text, default="")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TeamSubtask(Base):
+    __tablename__ = "team_subtasks"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    team_run_id: Mapped[str] = mapped_column(ForeignKey("team_runs.id"))
+    subtask_key: Mapped[str] = mapped_column(String(80))
+    assignee_teammate_id: Mapped[int] = mapped_column(ForeignKey("teammates.id"))
+    objective: Mapped[str] = mapped_column(Text)
+    output_format: Mapped[str] = mapped_column(Text, default="structured_findings")
+    depends_on_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(40), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    depth: Mapped[int] = mapped_column(Integer, default=1)
+    critical: Mapped[bool] = mapped_column(Boolean, default=True)
+    allowed_tool_categories_json: Mapped[str] = mapped_column(Text, default='["local","workspace"]')
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    artifact_refs_json: Mapped[str] = mapped_column(Text, default="[]")
+    conversation_id: Mapped[int | None] = mapped_column(ForeignKey("conversations.id"), nullable=True)
+    agent_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checkpoint_json: Mapped[str] = mapped_column(Text, default="{}")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class TeamEvent(Base):
+    __tablename__ = "team_events"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    team_run_id: Mapped[str] = mapped_column(ForeignKey("team_runs.id"))
+    subtask_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    event_type: Mapped[str] = mapped_column(String(60))
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 

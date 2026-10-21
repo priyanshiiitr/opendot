@@ -9,12 +9,14 @@ User -> React/Electron -> FastAPI
                             |-> ComputerManager -> LocalBrowserComputer (persistent Playwright profile)
                             |-> SkillRegistry (local SKILL.md packages; review before enable)
                             |-> WorkflowService (steps, checkpoints, artifact verify)
+                            |-> TeamCoordinator -> TeamRun/Subtask -> AgentRuntime (per assignee)
                             |-> AutomationWorker (lifespan) -> claim AutomationRun -> AgentRuntime
+                            |-> RemoteAuthMiddleware (optional; off by default)
                             |-> /hooks/{id} webhook receiver
                             |-> ConnectorManager + ConnectorGrant / SQLite
 ```
 
-See ADR `0007`, `0008`, and `0009-memory-skills-scoped-permissions-workflows.md`.
+Clients: Electron desktop, Vite web, companion view — all talk to the same FastAPI service. See ADR `0007`–`0011`.
 
 ## Request path for a tool-using turn
 
@@ -75,6 +77,29 @@ See `docs/decisions/0004-browser-navigation-security.md` and `0005-playwright-is
 | `WorkflowService` | Step graph, checkpoints, deterministic verify | Multi-agent delegation; claim success from prose |
 
 Data flow for “use my startup-research skill”: retrieve memories → resolve enabled skill install → create workflow with pinned `skill_version` + `memory_ids` → advance safe steps → write workspace artifact → verify → report. Backend authorization remains authoritative at every tool call.
+
+## Multi-agent teams (Milestone 8)
+
+| Piece | Role |
+| --- | --- |
+| `Team` | Configurable roster + limits (not a fixed five-agent cast) |
+| `validate_plan` | Rejects cycles, unknown deps, unauthorized assignees, depth/count breaches |
+| `TeamCoordinator.tick` | Dependency-aware scheduling; each subtask = fresh conversation + AgentRuntime |
+| Structured result | findings, artifacts, limitations — not “fluent text = success” |
+| Final report | Distinguishes completed / failed / unverified; critical failures ⇒ run failed |
+
+Least privilege: subtask `allowed_tool_categories` restrict the broker; shared runtime lock serializes tool turns. `max_depth=1` blocks specialist re-delegation by default.
+
+## Always-on & remote companion (Milestone 9)
+
+| Concern | Behavior |
+| --- | --- |
+| Service lifecycle | `uvicorn` + lifespan worker; scripts under `scripts/` |
+| Default exposure | `127.0.0.1`, remote pairing disabled |
+| Pairing | Loopback-only start → one-time code → hashed session token |
+| Auth | Non-loopback requires session when remote enabled; loopback trusted for desktop |
+| Companion | Responsive UI: runs, approvals, notifications; disconnect ≠ cancel |
+| Honest limits | No work when PC off; DB “ready” ≠ live browser process |
 
 ## SSE event types
 

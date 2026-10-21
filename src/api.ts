@@ -49,6 +49,31 @@ export type ConnectorStatus = {
 }
 
 const API = 'http://127.0.0.1:8000'
+const SESSION_KEY = 'ai_teammates_session'
+
+export function getSessionToken(): string | null {
+  try {
+    return sessionStorage.getItem(SESSION_KEY)
+  } catch {
+    return null
+  }
+}
+
+export function setSessionToken(token: string | null) {
+  try {
+    if (token) sessionStorage.setItem(SESSION_KEY, token)
+    else sessionStorage.removeItem(SESSION_KEY)
+  } catch {
+    /* ignore */
+  }
+}
+
+function authHeaders(extra?: HeadersInit): HeadersInit {
+  const token = getSessionToken()
+  const headers: Record<string, string> = { ...(extra as Record<string, string>) }
+  if (token) headers['X-AI-Teammates-Session'] = token
+  return headers
+}
 
 /** Map SSE payloads into durable activity cards shown in the UI. */
 export function toActivity(event: StreamEvent): ExecutionEvent | null {
@@ -86,13 +111,15 @@ export function isSuccessfulTerminal(event: StreamEvent): boolean {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(API + path, init)
+  const headers = authHeaders(init?.headers)
+  const response = await fetch(API + path, { ...init, headers })
   if (!response.ok) throw new Error((await response.text()) || `Request failed (${response.status})`)
   return response.json()
 }
 
 async function* stream(path: string, init: RequestInit): AsyncGenerator<StreamEvent> {
-  const response = await fetch(API + path, init)
+  const headers = authHeaders(init.headers)
+  const response = await fetch(API + path, { ...init, headers })
   if (!response.ok || !response.body) throw new Error(await response.text())
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
@@ -203,6 +230,7 @@ export const api = {
     }),
   runAutomation: (id: string) => request<AutomationRun>(`/api/automations/${id}/run`, { method: 'POST' }),
   automationRuns: (id: string) => request<AutomationRun[]>(`/api/automations/${id}/runs`),
+  allAutomationRuns: () => request<AutomationRun[]>('/api/automation-runs'),
   automationRun: (runId: string) => request<AutomationRunReceipt>(`/api/automation-runs/${runId}`),
   cancelAutomationRun: (runId: string) =>
     request<AutomationRun>(`/api/automation-runs/${runId}/cancel`, { method: 'POST' }),
@@ -300,6 +328,170 @@ export const api = {
   workflow: (id: string) => request<WorkflowRun>(`/api/workflows/${id}`),
   advanceWorkflow: (id: string, completeExecute = false) =>
     request<WorkflowRun>(`/api/workflows/${id}/advance?complete_execute=${completeExecute}`, { method: 'POST' }),
+  teams: () => request<Team[]>('/api/teams'),
+  createTeam: (body: TeamCreate) =>
+    request<Team>('/api/teams', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  updateTeam: (id: string, body: Partial<TeamCreate> & { enabled?: boolean }) =>
+    request<Team>(`/api/teams/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  teamRuns: (teamId?: string) =>
+    request<TeamRunOut[]>(`/api/team-runs${teamId ? `?team_id=${teamId}` : ''}`),
+  createTeamRun: (teamId: string, body: { objective: string; subtasks: TeamSubtaskIn[] }) =>
+    request<TeamRunOut>(`/api/teams/${teamId}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  teamRun: (id: string) => request<TeamRunOut>(`/api/team-runs/${id}`),
+  tickTeamRun: (id: string, maxSteps?: number) =>
+    request<TeamRunOut>(
+      `/api/team-runs/${id}/tick${maxSteps != null ? `?max_steps=${maxSteps}` : ''}`,
+      { method: 'POST' },
+    ),
+  cancelTeamRun: (id: string) => request<TeamRunOut>(`/api/team-runs/${id}/cancel`, { method: 'POST' }),
+  remoteStatus: () => request<RemoteStatus>('/api/remote/status'),
+  startPairing: () => request<PairingStart>('/api/remote/pairing/start', { method: 'POST' }),
+  completePairing: (code: string, device_name: string) =>
+    request<PairingComplete>('/api/remote/pairing/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, device_name }),
+    }),
+  devices: () => request<PairedDevice[]>('/api/remote/devices'),
+  revokeDevice: (id: string) => request<{ revoked: boolean }>(`/api/remote/devices/${id}`, { method: 'DELETE' }),
+  logoutRemote: () => request<{ logged_out: boolean }>('/api/remote/logout', { method: 'POST' }),
+  diagnostics: () => request<Diagnostics>('/api/diagnostics'),
+  ready: () => request<ReadyStatus>('/ready'),
+}
+
+export type RemoteStatus = {
+  remote_access_enabled: boolean
+  bind_host: string
+  bind_port: number
+  local_trust_loopback: boolean
+  pairing_available: boolean
+  message: string
+}
+
+export type PairingStart = {
+  challenge_id: string
+  code: string
+  expires_at: string
+  ttl_seconds: number
+  message: string
+}
+
+export type PairingComplete = {
+  session_id: string
+  device_name: string
+  token: string
+  expires_at: string
+  message: string
+}
+
+export type PairedDevice = {
+  id: string
+  device_name: string
+  revoked: boolean
+  expires_at: string
+  last_seen_at: string | null
+  created_at: string
+}
+
+export type Diagnostics = {
+  status: string
+  provider: string
+  remote_access_enabled: boolean
+  worker_enabled: boolean
+  worker_running: boolean
+  bind_host: string
+  active_automation_runs: number
+  waiting_approvals: number
+  paired_devices: number
+  browser_computers_ready: number
+  recent_security_events: { id: string; event_type: string; detail: string; created_at: string }[]
+  notes: string[]
+}
+
+export type ReadyStatus = {
+  ready: boolean
+  database: boolean
+  worker_enabled: boolean
+  worker_running: boolean
+  remote_access_enabled: boolean
+  bind_host: string
+}
+
+export type Team = {
+  id: string
+  name: string
+  description: string
+  lead_teammate_id: number
+  member_ids: number[]
+  enabled: boolean
+  max_subtasks: number
+  max_concurrent: number
+  max_depth: number
+  max_retries: number
+  max_total_runs: number
+  created_at: string
+  updated_at: string
+}
+
+export type TeamCreate = {
+  name: string
+  description?: string
+  lead_teammate_id: number
+  member_ids: number[]
+  enabled?: boolean
+  max_concurrent?: number
+  max_depth?: number
+}
+
+export type TeamSubtaskIn = {
+  subtask_key: string
+  assignee_teammate_id: number
+  objective: string
+  depends_on?: string[]
+  critical?: boolean
+  allowed_tool_categories?: string[]
+}
+
+export type TeamRunOut = {
+  id: string
+  team_id: string
+  lead_teammate_id: number
+  objective: string
+  status: string
+  cancelled: boolean
+  plan: Record<string, unknown>
+  report: Record<string, unknown>
+  shared_artifact_dir: string
+  error_message: string | null
+  subtasks: {
+    id: string
+    subtask_key: string
+    assignee_teammate_id: number
+    objective: string
+    depends_on: string[]
+    status: string
+    attempts: number
+    result: Record<string, unknown>
+    artifact_refs: string[]
+    error_message: string | null
+    conversation_id: number | null
+  }[]
+  events: { id: string; event_type: string; payload: Record<string, unknown>; created_at: string }[]
+  created_at: string
+  updated_at: string
+  finished_at: string | null
 }
 
 export type MemoryRecord = {
