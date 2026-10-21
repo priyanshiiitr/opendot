@@ -141,6 +141,8 @@ export type ComputerStatus = {
   id: string
   teammate_id: number
   provider: string
+  isolation_tier?: string
+  control_state?: string
   state: string
   human_control: boolean
   last_url: string | null
@@ -151,7 +153,10 @@ export type ComputerStatus = {
   artifacts_path: string
   browser_open: boolean
   isolation_note?: string
+  limits?: { idle_stop_minutes?: number; max_runtime_minutes?: number; billable_allowed?: boolean }
+  health?: { healthy?: boolean; note?: string; browser_process_alive?: boolean }
   message?: string | null
+  deleted?: boolean
 }
 
 export const api = {
@@ -163,6 +168,19 @@ export const api = {
       body: JSON.stringify({ name, description }),
     }),
   computer: (teammateId: number) => request<ComputerStatus>(`/api/teammates/${teammateId}/computer`),
+  provisionComputer: (teammateId: number, provider?: 'local_browser' | 'isolated_linux_dev') =>
+    request<ComputerStatus>(`/api/teammates/${teammateId}/computer/provision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(provider ? { provider } : {}),
+    }),
+  computerHealth: (teammateId: number) =>
+    request<ComputerStatus>(`/api/teammates/${teammateId}/computer/health`),
+  deleteComputer: (teammateId: number) =>
+    request<{ deleted: boolean; message?: string }>(
+      `/api/teammates/${teammateId}/computer/delete?confirm=true`,
+      { method: 'POST' },
+    ),
   startComputer: (teammateId: number, headed = false) =>
     request<ComputerStatus>(`/api/teammates/${teammateId}/computer/start?headed=${headed}`, { method: 'POST' }),
   stopComputer: (teammateId: number) =>

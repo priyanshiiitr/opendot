@@ -10,6 +10,6 @@
 - [x] Milestone 7: persistent memory, versioned skills, account/resource-scoped grants, single-agent workflows
 - [x] Milestone 8: multi-agent teams, bounded coordinator, dependency-aware subtasks
 - [x] Milestone 9: always-on service mode, device pairing, companion UI, diagnostics
+- [x] Milestone 10: ComputerProvider abstraction, mock + isolated_linux_dev, lifecycle/takeover/health/delete, billable stub (no paid VMs without approval)
 - [ ] Milestone 4 (later): additional connectors (Gmail/GitHub/etc.) without rewriting the agent runtime
-- [ ] Milestone 10: controlled desktop operations (computer-use / OS control) — not started
-- [ ] Future: isolated VM or cloud-computer provider behind the same ComputerProvider interface
+- [ ] Future (requires owner approval + credentials): billable managed Linux desktop / VM behind the same ComputerProvider interface

@@ -128,10 +128,25 @@ def _migrate_m9_remote_access(engine: Engine, db: Session) -> None:
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_pairing_expires ON pairing_challenges (expires_at)"))
 
 
+def _migrate_m10_cloud_computers(engine: Engine, db: Session) -> None:
+    with engine.begin() as conn:
+        cols = {c["name"] for c in inspect(engine).get_columns("computers")}
+        if "isolation_tier" not in cols:
+            conn.execute(text("ALTER TABLE computers ADD COLUMN isolation_tier VARCHAR(40) DEFAULT 'local_browser'"))
+        if "control_state" not in cols:
+            conn.execute(text("ALTER TABLE computers ADD COLUMN control_state VARCHAR(40) DEFAULT 'agent_control'"))
+        if "external_ref" not in cols:
+            conn.execute(text("ALTER TABLE computers ADD COLUMN external_ref VARCHAR(200)"))
+        if "provider_meta_json" not in cols:
+            conn.execute(text("ALTER TABLE computers ADD COLUMN provider_meta_json TEXT DEFAULT '{}'"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_computers_provider ON computers (provider, state)"))
+
+
 MIGRATIONS: list[tuple[str, Callable]] = [
     ("2026_10_m5_automations", _migrate_m5_automations),
     ("2026_10_m6_computers", _migrate_m6_computers),
     ("2026_10_m7_memory_skills_workflows", _migrate_m7_memory_skills_workflows),
     ("2026_10_m8_multi_agent_teams", _migrate_m8_teams),
     ("2026_10_m9_remote_access", _migrate_m9_remote_access),
+    ("2026_10_m10_cloud_computers", _migrate_m10_cloud_computers),
 ]

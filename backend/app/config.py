@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     computer_preview_min_interval_ms: int = 1500
     computer_max_file_bytes: int = 256_000
     computer_headless_default: bool = True
+    # Milestone 10 — provider: local_browser | isolated_linux_dev (billable_cloud refused without approval)
+    computer_default_provider: str = "local_browser"
+    computer_allow_billable: bool = False
+    computer_idle_stop_minutes: int = 30
+    computer_max_runtime_minutes: int = 240
     # Milestone 7 — memory / skills / workflows
     skills_root_dir: str = "./data/skills"
     memory_max_retrieve: int = 12

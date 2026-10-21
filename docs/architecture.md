@@ -6,7 +6,8 @@ User -> React/Electron -> FastAPI
                             |      |-> MemoryService (scoped retrieve → system prompt)
                             |      |-> MockProvider / GroqProvider / XAIProvider
                             |      |-> ToolRegistry + PermissionBroker(+ AuthContext)
-                            |-> ComputerManager -> LocalBrowserComputer (persistent Playwright profile)
+                            |-> ComputerManager -> ComputerProvider implementations:
+                            |      local_browser | isolated_linux_dev | (billable_cloud stub)
                             |-> SkillRegistry (local SKILL.md packages; review before enable)
                             |-> WorkflowService (steps, checkpoints, artifact verify)
                             |-> TeamCoordinator -> TeamRun/Subtask -> AgentRuntime (per assignee)
@@ -16,7 +17,7 @@ User -> React/Electron -> FastAPI
                             |-> ConnectorManager + ConnectorGrant / SQLite
 ```
 
-Clients: Electron desktop, Vite web, companion view — all talk to the same FastAPI service. See ADR `0007`–`0011`.
+Clients: Electron desktop, Vite web, companion view — all talk to the same FastAPI service. See ADR `0007`–`0012`.
 
 ## Request path for a tool-using turn
 
@@ -100,6 +101,24 @@ Least privilege: subtask `allowed_tool_categories` restrict the broker; shared r
 | Auth | Non-loopback requires session when remote enabled; loopback trusted for desktop |
 | Companion | Responsive UI: runs, approvals, notifications; disconnect ≠ cancel |
 | Honest limits | No work when PC off; DB “ready” ≠ live browser process |
+
+## Computer providers (Milestone 10)
+
+| Layer | Responsibility |
+| --- | --- |
+| Control plane | FastAPI, PermissionBroker, AutomationWorker, ComputerManager — never called directly by the model’s cloud SDK |
+| Execution environment | Per-teammate computer root (profile + workspace + artifacts) |
+| `ComputerProvider` | Protocol: provision/start/stop/health/preview/takeover/delete |
+| `local_browser` | M6 Playwright persistent context on the host |
+| `isolated_linux_dev` | Same host, stronger filesystem boundary + isolation.json; not a VM |
+| `mock_cloud` | Contract tests only |
+| `billable_cloud` | Stub; fails closed until allow flag + owner approval |
+
+**Laptop independence:** a cloud desktop without a remote control plane still dies when the orchestrator laptop is off. Deploy M9’s always-on service remotely to continue durable tasks; do not auto-migrate SQLite without an approved plan.
+
+**Takeover states:** `agent_control` → `pause_requested` → `waiting_for_safe_point` → `human_control` → `returning_to_agent` → `agent_control`. Backend owns exclusivity via action locks.
+
+**Secrets:** model API keys stay on the control plane. Computer roots must not receive host `.env`, Docker sockets, or cloud control-plane credentials.
 
 ## SSE event types
 

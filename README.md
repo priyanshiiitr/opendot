@@ -1,6 +1,6 @@
 # AI Teammates
 
-Local-first desktop AI teammate with a bounded agent loop, Playwright browser tools, connectors, durable automations, per-teammate computers, memory/skills/workflows, multi-agent teams, and an optional **always-on service + paired mobile companion** (Milestone 9).
+Local-first desktop AI teammate with a bounded agent loop, Playwright browser tools, connectors, durable automations, per-teammate computers (local + isolated Linux-dev provider), memory/skills/workflows, multi-agent teams, optional always-on companion (M9), and a **cloud-computer provider abstraction** (Milestone 10 — billable VMs not auto-provisioned).
 
 ## Prerequisites
 
@@ -45,6 +45,34 @@ cd ..
 npm test
 npm run build
 ```
+
+## Milestone 10 — Isolated computers (provider abstraction)
+
+Each teammate still has one stable computer ID. Providers:
+
+| Provider | Isolation | Verified in M10 |
+|----------|-----------|-----------------|
+| `local_browser` (default) | Persistent Playwright profile on the host | Yes (M6+) |
+| `isolated_linux_dev` | Separate root + profile + isolation manifest (filesystem sandbox) | Yes (dev) |
+| `mock_cloud` | In-memory/fs mock for contract tests | Tests only |
+| `billable_cloud` | Stub — **refuses** provision without approval + credentials | Stub only |
+
+**Computer panel:** Provision local / Provision isolated Linux-dev → Health check → Start → Take over / Return control → Delete computer (`confirm=true` wipes workspace + profile).
+
+```powershell
+# Optional defaults in backend\.env
+AI_TEAMMATES_COMPUTER_DEFAULT_PROVIDER=local_browser
+AI_TEAMMATES_COMPUTER_ALLOW_BILLABLE=false
+```
+
+**Honest limits**
+
+- No paid cloud VM is created by this codebase path.
+- `isolated_linux_dev` is **not** a security-equivalent hypervisor VM.
+- Laptop-independent agent work still requires the **control plane** (uvicorn + worker) on an always-on host (M9) — a remote desktop alone is not enough.
+- Changing provider requires **Delete computer** first (no silent local→cloud migration).
+
+See ADR `docs/decisions/0012-cloud-computer-provider-abstraction.md`.
 
 ## Milestone 9 — Always-on service & companion
 
@@ -148,4 +176,5 @@ Open **Automations** in the sidebar.
 - `docs/decisions/0009-memory-skills-scoped-permissions-workflows.md`
 - `docs/decisions/0010-multi-agent-team-coordinator.md`
 - `docs/decisions/0011-always-on-remote-companion.md`
+- `docs/decisions/0012-cloud-computer-provider-abstraction.md`
 - `docs/interview_guide.md`

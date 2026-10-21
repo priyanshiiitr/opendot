@@ -73,3 +73,14 @@ User: “research startups” → Mock emits `browser_open` → `NavigationPolic
 - **Auth ≠ approval:** a paired phone can *request* approve/reject; PermissionBroker still binds the exact pending operation.
 - **Network errors ≠ task failure:** companion shows disconnect messages without marking host jobs done.
 - **No silent startup installs:** user-level Startup shortcut only if they run the register script.
+
+## Milestone 10
+
+- **Control plane ≠ computer:** the model never talks to Fly/AWS APIs; ComputerManager authorizes and routes.
+- **Provider protocol first:** mock + isolated_linux_dev prove the contract before any billable account.
+- **Idempotent provision:** same teammate → same computer id; interrupted `provisioning` is reconciled before retry.
+- **Workspace vs VM disk:** stopping a runtime keeps the workspace root; delete(confirm) destroys it.
+- **Filesystem sandbox ≠ VM:** honest isolation_tier labels prevent interview overclaims.
+- **Takeover is a state machine:** pause → safe point (action lock) → human exclusive → refresh on return.
+- **Laptop independence is deployment:** remote worker + DB + computers; not “screenshot looks like cloud.”
+- **Billable gate:** stub + `COMPUTER_ALLOW_BILLABLE=false` by default; no charges from CI.

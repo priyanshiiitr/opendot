@@ -1,8 +1,9 @@
-"""Backend-owned lifecycle for per-teammate local browser computers."""
+"""Backend-owned lifecycle for per-teammate computers (local + isolated Linux-dev)."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import time
 import uuid
@@ -16,23 +17,29 @@ from ..browser.policy import NavigationPolicy
 from ..browser.session import BrowserService
 from ..config import Settings
 from ..database import ComputerRecord, Teammate
+from .base import LIFECYCLE_STATES
+from .billable_stub import BillableCloudNotConfigured
 from .context import current_computer_id, current_teammate_id
+from .isolated_linux import ISOLATION_NOTE as ISOLATED_LINUX_NOTE
+from .isolated_linux import IsolatedLinuxDevComputer
 from .paths import computer_layout, default_computers_root, ensure_layout
 from .workspace import WorkspaceError, WorkspaceStore
 
-VALID_STATES = frozenset(
-    {
-        "stopped",
-        "starting",
-        "ready",
-        "busy",
-        "paused",
-        "waiting_human",
-        "human_control",
-        "recovering",
-        "error",
-    }
-)
+VALID_STATES = LIFECYCLE_STATES | frozenset({"error"})
+
+SUPPORTED_PROVIDERS = frozenset({"local_browser", "isolated_linux_dev", "billable_cloud"})
+
+ISOLATION_NOTES = {
+    "local_browser": (
+        "Local persistent Playwright profile — not a full VM and not your everyday Chrome. "
+        "Sessions may expire; re-authentication may be required."
+    ),
+    "isolated_linux_dev": ISOLATED_LINUX_NOTE,
+    "billable_cloud": (
+        "Billable managed cloud — not configured. Explicit provider approval + credentials required."
+    ),
+    "mock_cloud": "Contract-test mock only — not a real cloud computer.",
+}
 
 
 class ComputerError(Exception):
@@ -45,6 +52,7 @@ class LocalBrowserComputer:
     """Concrete local provider: persistent Playwright profile + workspace."""
 
     provider_name = "local_browser"
+    isolation_tier = "local_browser"
 
     def __init__(
         self,
@@ -82,6 +90,43 @@ class LocalBrowserComputer:
         self._action_lock = asyncio.Lock()
         self._last_preview_at = 0.0
 
+    async def provision(self) -> dict[str, Any]:
+        ensure_layout(self.paths)
+        return {
+            "computer_id": self.record.id,
+            "provider": self.provider_name,
+            "isolation_tier": self.isolation_tier,
+            "root": str(self.paths["root"]),
+        }
+
+    async def start(self, *, headed: bool = False) -> dict[str, Any]:
+        await self.open_browser(headed=headed)
+        return {"state": "ready", "browser_open": True, "healthy": True}
+
+    async def stop(self) -> dict[str, Any]:
+        await self.close_browser()
+        return {"state": "stopped", "browser_open": False}
+
+    async def health(self) -> dict[str, Any]:
+        root_ok = self.paths["root"].is_dir()
+        return {
+            "healthy": root_ok,
+            "root_ok": root_ok,
+            "browser_process_alive": self.browser.is_open,
+            "isolation_tier": self.isolation_tier,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    async def status(self) -> dict[str, Any]:
+        return {
+            "computer_id": self.record.id,
+            "teammate_id": self.record.teammate_id,
+            "provider": self.provider_name,
+            "isolation_tier": self.isolation_tier,
+            "browser_open": self.browser.is_open,
+            "url": self.browser.last_url,
+        }
+
     async def open_browser(self, *, headed: bool = False) -> dict[str, Any]:
         self.browser.headless = not headed
         await self.browser.ensure_session()
@@ -109,6 +154,7 @@ class LocalBrowserComputer:
             await self.open_browser(headed=True)
         return {
             "human_control": True,
+            "control_state": "human_control",
             "url": self.browser.refresh_url_from_page(),
             "note": "Use the headed AI Teammates browser window. This is not your everyday Chrome profile.",
         }
@@ -123,12 +169,25 @@ class LocalBrowserComputer:
             await self.browser.reopen(headless=self.settings.computer_headless_default)
         return {
             "human_control": False,
+            "control_state": "agent_control",
             "url": url,
             "note": "Browser state refreshed after human control. Prior page assumptions are invalid.",
         }
 
+    async def delete(self, *, confirm: bool = False) -> dict[str, Any]:
+        if not confirm:
+            raise ComputerError("Delete requires confirm=true — this removes workspace and profile data.")
+        await self.close_browser()
+        root = self.paths["root"]
+        if root.is_dir():
+            shutil.rmtree(root, ignore_errors=True)
+        return {"deleted": True, "computer_id": self.record.id, "root_removed": str(root)}
+
     def workspace_paths(self) -> dict[str, str]:
         return {k: str(v) for k, v in self.paths.items()}
+
+
+LiveComputer = LocalBrowserComputer | IsolatedLinuxDevComputer
 
 
 class ComputerManager:
@@ -138,22 +197,62 @@ class ComputerManager:
         self.policy = policy
         self.root = default_computers_root(settings.computers_root_dir)
         self.root.mkdir(parents=True, exist_ok=True)
-        self._live: dict[str, LocalBrowserComputer] = {}
+        self._live: dict[str, LiveComputer] = {}
         self._lock = asyncio.Lock()
+        self._provision_locks: dict[int, asyncio.Lock] = {}
 
-    def get_or_create_record(self, db: Session, teammate_id: int) -> ComputerRecord:
+    def _normalize_provider(self, provider: str | None) -> str:
+        name = (provider or self.settings.computer_default_provider or "local_browser").strip()
+        if name not in SUPPORTED_PROVIDERS:
+            raise ComputerError(
+                f"Unsupported computer provider '{name}'. "
+                f"Supported: local_browser, isolated_linux_dev (billable_cloud requires approval)."
+            )
+        if name == "billable_cloud" and not self.settings.computer_allow_billable:
+            raise ComputerError(
+                "Billable cloud computers are disabled. Set AI_TEAMMATES_COMPUTER_ALLOW_BILLABLE=true "
+                "only after explicit approval, then configure a real provider adapter."
+            )
+        return name
+
+    def _isolation_tier_for(self, provider: str) -> str:
+        return {
+            "local_browser": "local_browser",
+            "isolated_linux_dev": "filesystem_sandbox",
+            "billable_cloud": "managed_cloud",
+        }.get(provider, "local_browser")
+
+    def get_or_create_record(
+        self, db: Session, teammate_id: int, *, provider: str | None = None
+    ) -> ComputerRecord:
         if not db.get(Teammate, teammate_id):
             raise ComputerError("Teammate not found.")
         row = db.query(ComputerRecord).filter_by(teammate_id=teammate_id).first()
         if row:
+            if provider and provider != row.provider:
+                raise ComputerError(
+                    f"Computer already exists with provider '{row.provider}'. "
+                    "Delete it (confirm=true) before provisioning a different provider. "
+                    "Local computers are never silently migrated to cloud."
+                )
             return row
+        chosen = self._normalize_provider(provider)
+        if chosen == "billable_cloud":
+            raise ComputerError(
+                "Billable cloud computers are not auto-provisioned. "
+                "Choose a provider (see docs/decisions/0012), configure credentials outside chat, "
+                "and give explicit approval before any paid VM is created."
+            )
         computer_id = str(uuid.uuid4())
         paths = computer_layout(self.root, computer_id)
         ensure_layout(paths)
         row = ComputerRecord(
             id=computer_id,
             teammate_id=teammate_id,
-            provider="local_browser",
+            provider=chosen,
+            isolation_tier=self._isolation_tier_for(chosen),
+            control_state="agent_control",
+            provider_meta_json="{}",
             state="stopped",
             root_path=str(paths["root"]),
         )
@@ -168,14 +267,28 @@ class ComputerManager:
             raise ComputerError("Computer not found for this teammate.")
         return row
 
-    async def _live_for(self, record: ComputerRecord) -> LocalBrowserComputer:
+    def _build_live(self, record: ComputerRecord) -> LiveComputer:
+        if record.provider == "isolated_linux_dev":
+            return IsolatedLinuxDevComputer(record, self.settings, self.policy)
+        if record.provider == "billable_cloud":
+            raise ComputerError("Billable cloud provider is not configured.")
+        return LocalBrowserComputer(record, self.settings, self.policy)
+
+    async def _live_for(self, record: ComputerRecord) -> LiveComputer:
         async with self._lock:
             live = self._live.get(record.id)
             if live:
                 return live
-            live = LocalBrowserComputer(record, self.settings, self.policy)
+            live = self._build_live(record)
             self._live[record.id] = live
             return live
+
+    def _provision_lock_for(self, teammate_id: int) -> asyncio.Lock:
+        lock = self._provision_locks.get(teammate_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._provision_locks[teammate_id] = lock
+        return lock
 
     def bind_context(self, teammate_id: int, computer_id: str):
         t = current_teammate_id.set(teammate_id)
@@ -226,16 +339,27 @@ class ComputerManager:
             root = Path(record.root_path)
             return WorkspaceStore(root / "workspace", root / "artifacts", max_file_bytes=self.settings.computer_max_file_bytes)
 
-    def public_status(self, db: Session, teammate_id: int) -> dict[str, Any]:
-        record = self.get_or_create_record(db, teammate_id)
+    def get_record(self, db: Session, teammate_id: int) -> ComputerRecord | None:
+        return db.query(ComputerRecord).filter_by(teammate_id=teammate_id).first()
+
+    def public_status(self, db: Session, teammate_id: int, *, create: bool = True) -> dict[str, Any]:
+        record = self.get_or_create_record(db, teammate_id) if create else self.get_record(db, teammate_id)
+        if record is None:
+            raise ComputerError("Computer not found. Provision or start one for this teammate.")
         live = self._live.get(record.id)
         url = record.last_url
         if live and live.browser.is_open:
             url = live.browser.refresh_url_from_page() or url
+        isolation_tier = getattr(record, "isolation_tier", None) or self._isolation_tier_for(record.provider)
+        control_state = getattr(record, "control_state", None) or (
+            "human_control" if record.human_control else "agent_control"
+        )
         return {
             "id": record.id,
             "teammate_id": record.teammate_id,
             "provider": record.provider,
+            "isolation_tier": isolation_tier,
+            "control_state": control_state,
             "state": record.state,
             "human_control": record.human_control,
             "last_url": url,
@@ -248,10 +372,12 @@ class ComputerManager:
             "last_used_at": record.last_used_at,
             "created_at": record.created_at,
             "updated_at": record.updated_at,
-            "isolation_note": (
-                "Local persistent Playwright profile — not a full VM and not your everyday Chrome. "
-                "Sessions may expire; re-authentication may be required."
-            ),
+            "isolation_note": ISOLATION_NOTES.get(record.provider, ISOLATION_NOTES["local_browser"]),
+            "limits": {
+                "idle_stop_minutes": self.settings.computer_idle_stop_minutes,
+                "max_runtime_minutes": self.settings.computer_max_runtime_minutes,
+                "billable_allowed": self.settings.computer_allow_billable,
+            },
         }
 
     def _set_state(self, db: Session, record: ComputerRecord, state: str, **fields: Any) -> ComputerRecord:
@@ -266,10 +392,120 @@ class ComputerManager:
         db.refresh(record)
         return record
 
+    async def provision(self, teammate_id: int, *, provider: str | None = None) -> dict[str, Any]:
+        """Idempotent provision: stable ID per teammate; never duplicates resources."""
+        async with self._provision_lock_for(teammate_id):
+            with self.session_factory() as db:
+                existing = db.query(ComputerRecord).filter_by(teammate_id=teammate_id).first()
+                if existing and provider and provider != existing.provider:
+                    raise ComputerError(
+                        f"Computer already exists with provider '{existing.provider}'. "
+                        "Delete with confirm=true before changing providers."
+                    )
+                if existing and existing.state == "provisioning":
+                    # Reconcile interrupted provision before another create.
+                    existing.state = "stopped"
+                    existing.last_action = "reconciled_interrupted_provision"
+                    db.commit()
+                record = self.get_or_create_record(db, teammate_id, provider=provider)
+                self._set_state(db, record, "provisioning", last_error=None)
+                computer_id = record.id
+            try:
+                with self.session_factory() as db:
+                    record = db.get(ComputerRecord, computer_id)
+                    assert record is not None
+                    live = await self._live_for(record)
+                    info = await live.provision()
+                    meta = {"last_provision": info, "updated_at": datetime.now(timezone.utc).isoformat()}
+                    self._set_state(
+                        db,
+                        record,
+                        "stopped",
+                        last_action="provision",
+                        isolation_tier=getattr(live, "isolation_tier", record.isolation_tier),
+                        provider_meta_json=json.dumps(meta),
+                        control_state="agent_control",
+                    )
+                    status = self.public_status(db, teammate_id)
+                    status["provision"] = info
+                    status["idempotent"] = True
+                    return status
+            except BillableCloudNotConfigured as exc:
+                with self.session_factory() as db:
+                    record = db.get(ComputerRecord, computer_id)
+                    if record:
+                        self._set_state(db, record, "failed", last_error=str(exc)[:300])
+                raise ComputerError(exc.reason) from exc
+            except Exception as exc:
+                with self.session_factory() as db:
+                    record = db.get(ComputerRecord, computer_id)
+                    if record:
+                        self._set_state(db, record, "failed", last_error=str(exc)[:300])
+                raise ComputerError(f"Failed to provision computer: {exc}") from exc
+
+    async def health(self, teammate_id: int) -> dict[str, Any]:
+        with self.session_factory() as db:
+            record = self.get_record(db, teammate_id)
+            if record is None:
+                raise ComputerError("Computer not found. Provision or start one for this teammate.")
+            live = self._live.get(record.id)
+            if live is None:
+                # Cheap filesystem health without starting browser processes.
+                root = Path(record.root_path)
+                probe = {
+                    "healthy": root.is_dir(),
+                    "root_ok": root.is_dir(),
+                    "browser_process_alive": False,
+                    "isolation_tier": record.isolation_tier,
+                    "note": "Record exists; runtime not loaded. DB ready ≠ process alive.",
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                }
+            else:
+                probe = await live.health()
+            status = self.public_status(db, teammate_id, create=False)
+            status["health"] = probe
+            return status
+
+    async def delete_computer(self, teammate_id: int, *, confirm: bool = False) -> dict[str, Any]:
+        if not confirm:
+            raise ComputerError("Deleting a computer requires confirm=true — workspace and profile are removed.")
+        with self.session_factory() as db:
+            record = db.query(ComputerRecord).filter_by(teammate_id=teammate_id).first()
+            if not record:
+                raise ComputerError("Computer not found.")
+            computer_id = record.id
+            self._set_state(db, record, "deleting", control_state="agent_control")
+        live = self._live.pop(computer_id, None)
+        try:
+            if live is None:
+                with self.session_factory() as db:
+                    record = db.get(ComputerRecord, computer_id)
+                    assert record is not None
+                    live = self._build_live(record)
+            info = await live.delete(confirm=True)
+        except Exception as exc:
+            with self.session_factory() as db:
+                record = db.get(ComputerRecord, computer_id)
+                if record:
+                    self._set_state(db, record, "failed", last_error=f"Delete failed: {exc}"[:300])
+            raise ComputerError(f"Failed to delete computer: {exc}") from exc
+        with self.session_factory() as db:
+            record = db.get(ComputerRecord, computer_id)
+            if record:
+                db.delete(record)
+                db.commit()
+        return {
+            "deleted": True,
+            "computer_id": computer_id,
+            "teammate_id": teammate_id,
+            "message": "Computer deleted. Workspace, profile, and artifacts under its root were removed.",
+            "detail": info,
+        }
+
     async def start(self, teammate_id: int, *, headed: bool = False) -> dict[str, Any]:
         with self.session_factory() as db:
             record = self.get_or_create_record(db, teammate_id)
-            self._set_state(db, record, "starting")
+            self._set_state(db, record, "starting", control_state="agent_control")
             computer_id = record.id
         try:
             with self.session_factory() as db:
@@ -277,13 +513,13 @@ class ComputerManager:
                 assert record is not None
                 live = await self._live_for(record)
                 await live.open_browser(headed=headed)
-                self._set_state(db, record, "ready", last_error=None, human_control=False)
+                self._set_state(db, record, "ready", last_error=None, human_control=False, control_state="agent_control")
                 return self.public_status(db, teammate_id)
         except Exception as exc:
             with self.session_factory() as db:
                 record = db.get(ComputerRecord, computer_id)
                 if record:
-                    self._set_state(db, record, "error", last_error=str(exc)[:300])
+                    self._set_state(db, record, "failed", last_error=str(exc)[:300])
             raise ComputerError(f"Failed to start computer: {exc}") from exc
 
     async def stop(self, teammate_id: int) -> dict[str, Any]:
@@ -318,13 +554,14 @@ class ComputerManager:
     async def takeover(self, teammate_id: int) -> dict[str, Any]:
         with self.session_factory() as db:
             record = self.get_or_create_record(db, teammate_id)
-            self._set_state(db, record, "waiting_human")
+            self._set_state(db, record, "waiting_human", control_state="pause_requested")
             computer_id = record.id
         with self.session_factory() as db:
             record = db.get(ComputerRecord, computer_id)
             assert record is not None
             live = await self._live_for(record)
-            # Wait briefly for in-flight tool lock by acquiring action lock.
+            self._set_state(db, record, "waiting_human", control_state="waiting_for_safe_point")
+            # Wait for in-flight tool lock by acquiring action lock (safe point).
             async with live._action_lock:
                 info = await live.enter_human_control()
             self._set_state(
@@ -332,6 +569,7 @@ class ComputerManager:
                 record,
                 "human_control",
                 human_control=True,
+                control_state="human_control",
                 last_url=info.get("url"),
                 last_action="human_takeover",
             )
@@ -342,6 +580,7 @@ class ComputerManager:
     async def release_control(self, teammate_id: int) -> dict[str, Any]:
         with self.session_factory() as db:
             record = self.get_or_create_record(db, teammate_id)
+            self._set_state(db, record, record.state, control_state="returning_to_agent")
             live = self._live.get(record.id)
             if not live:
                 live = await self._live_for(record)
@@ -351,6 +590,7 @@ class ComputerManager:
                 record,
                 "ready" if live.browser.is_open else "stopped",
                 human_control=False,
+                control_state="agent_control",
                 last_url=info.get("url"),
                 last_action="release_human_control",
                 last_error=None,
@@ -407,12 +647,24 @@ class ComputerManager:
         """DB may say ready while no process exists — mark stopped; never restore human_control."""
         with self.session_factory() as db:
             for record in db.query(ComputerRecord).all():
-                if record.human_control or record.state in {"human_control", "waiting_human", "busy", "starting", "ready", "paused"}:
+                if record.state in {"provisioning", "deleting", "starting", "recovering"}:
+                    record.state = "stopped"
+                    record.last_action = "reconciled_interrupted_lifecycle"
+                if record.human_control or record.state in {
+                    "human_control",
+                    "waiting_human",
+                    "busy",
+                    "starting",
+                    "ready",
+                    "paused",
+                }:
                     record.human_control = False
-                    if record.state != "error":
+                    if record.state not in {"failed", "error", "deleted"}:
                         record.state = "stopped"
                     record.last_action = "reconciled_on_startup"
-                    record.updated_at = datetime.now(timezone.utc)
+                if hasattr(record, "control_state"):
+                    record.control_state = "agent_control"
+                record.updated_at = datetime.now(timezone.utc)
             db.commit()
 
     async def shutdown(self) -> None:

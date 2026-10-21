@@ -191,10 +191,16 @@ function ComputerPanel({
 
   async function refresh() {
     if (!teammate) return
-    const next = await api.computer(teammate.id)
-    setStatus(next)
-    const listing = await api.workspaceFiles(teammate.id, 'workspace')
-    setFiles(listing.files)
+    try {
+      const next = await api.computer(teammate.id)
+      setStatus(next)
+      const listing = await api.workspaceFiles(teammate.id, 'workspace')
+      setFiles(listing.files)
+    } catch {
+      setStatus(null)
+      setFiles([])
+      setPreview('')
+    }
   }
 
   useEffect(() => {
@@ -249,11 +255,37 @@ function ComputerPanel({
         <div>
           <p className="connection-help">
             State: <strong>{(status?.state || '…').replaceAll('_', ' ')}</strong>
+            {status?.control_state ? ` · control ${(status.control_state || '').replaceAll('_', ' ')}` : ''}
             {human ? ' · HUMAN IN CONTROL' : ''}
             {status?.last_url ? ` · ${status.last_url}` : ''}
           </p>
+          <p className="connection-help">
+            Provider: <strong>{status?.provider || '…'}</strong>
+            {status?.isolation_tier ? ` · ${status.isolation_tier.replaceAll('_', ' ')}` : ''}
+          </p>
           <p className="connection-help">{status?.isolation_note}</p>
           <div className="connection-actions">
+            <button disabled={busy} onClick={() => act(() => api.provisionComputer(teammate.id, 'local_browser'))}>
+              Provision local
+            </button>
+            <button
+              disabled={busy}
+              onClick={() => act(() => api.provisionComputer(teammate.id, 'isolated_linux_dev'))}
+              title="Filesystem sandbox on this host — not a billable cloud VM"
+            >
+              Provision isolated Linux-dev
+            </button>
+            <button
+              disabled={busy}
+              onClick={() =>
+                act(async () => {
+                  const h = await api.computerHealth(teammate.id)
+                  return h
+                })
+              }
+            >
+              Health check
+            </button>
             <button disabled={busy} onClick={() => act(() => api.startComputer(teammate.id, false))}>
               Start
             </button>
@@ -286,7 +318,38 @@ function ComputerPanel({
             >
               Clear browser data
             </button>
+            <button
+              className="reject"
+              disabled={busy}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    'DELETE this computer entirely? Workspace, profile, and artifacts under its root are removed. This cannot be undone.',
+                  )
+                ) {
+                  void (async () => {
+                    setBusy(true)
+                    try {
+                      await api.deleteComputer(teammate.id)
+                      await refresh()
+                    } catch (e) {
+                      onError(e instanceof Error ? e.message : 'Delete failed')
+                    } finally {
+                      setBusy(false)
+                    }
+                  })()
+                }
+              }}
+            >
+              Delete computer
+            </button>
           </div>
+          {status?.health && (
+            <p className="connection-help">
+              Health: {status.health.healthy ? 'ok' : 'not ready'}
+              {status.health.note ? ` — ${status.health.note}` : ''}
+            </p>
+          )}
           {status?.last_error && <p className="connection-warn">{status.last_error}</p>}
           <div className="preview-frame">
             {preview && status?.browser_open ? (

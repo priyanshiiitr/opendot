@@ -32,6 +32,7 @@ from .schemas import (
     AutomationRunReceipt,
     AutomationUpdate,
     ChatRequest,
+    ComputerProvisionRequest,
     ComputerStatusOut,
     ConnectorGrantIn,
     ConnectorGrantOut,
@@ -267,7 +268,47 @@ def get_computer(teammate_id: int, db: Session = Depends(get_db)) -> dict:
     if not db.get(Teammate, teammate_id):
         raise HTTPException(404, "Teammate not found")
     try:
-        return computer_manager.public_status(db, teammate_id)
+        # Do not recreate after delete — provision/start create explicitly.
+        return computer_manager.public_status(db, teammate_id, create=False)
+    except ComputerError as exc:
+        raise HTTPException(404 if "not found" in exc.reason.lower() else 400, exc.reason) from exc
+
+
+@app.post("/api/teammates/{teammate_id}/computer/provision", response_model=ComputerStatusOut)
+async def provision_computer(
+    teammate_id: int,
+    body: ComputerProvisionRequest | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    provider = body.provider if body else None
+    try:
+        return await computer_manager.provision(teammate_id, provider=provider)
+    except ComputerError as exc:
+        raise HTTPException(400, exc.reason) from exc
+
+
+@app.get("/api/teammates/{teammate_id}/computer/health")
+async def computer_health(teammate_id: int, db: Session = Depends(get_db)) -> dict:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    try:
+        return await computer_manager.health(teammate_id)
+    except ComputerError as exc:
+        raise HTTPException(400, exc.reason) from exc
+
+
+@app.post("/api/teammates/{teammate_id}/computer/delete")
+async def delete_computer(
+    teammate_id: int,
+    confirm: bool = False,
+    db: Session = Depends(get_db),
+) -> dict:
+    if not db.get(Teammate, teammate_id):
+        raise HTTPException(404, "Teammate not found")
+    try:
+        return await computer_manager.delete_computer(teammate_id, confirm=confirm)
     except ComputerError as exc:
         raise HTTPException(400, exc.reason) from exc
 

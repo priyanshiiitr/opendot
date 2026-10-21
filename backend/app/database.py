@@ -220,12 +220,16 @@ class SecurityAuditEvent(Base):
 
 
 class ComputerRecord(Base):
-    """Persistent metadata for a teammate's isolated local browser computer."""
+    """Persistent metadata for a teammate's computer (local browser or isolated Linux-dev)."""
 
     __tablename__ = "computers"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     teammate_id: Mapped[int] = mapped_column(ForeignKey("teammates.id"), unique=True)
     provider: Mapped[str] = mapped_column(String(40), default="local_browser")
+    isolation_tier: Mapped[str] = mapped_column(String(40), default="local_browser")
+    control_state: Mapped[str] = mapped_column(String(40), default="agent_control")
+    external_ref: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    provider_meta_json: Mapped[str] = mapped_column(Text, default="{}")
     state: Mapped[str] = mapped_column(String(40), default="stopped")
     root_path: Mapped[str] = mapped_column(Text, default="")
     last_url: Mapped[str | None] = mapped_column(Text, nullable=True)

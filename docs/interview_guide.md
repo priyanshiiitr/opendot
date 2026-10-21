@@ -256,3 +256,35 @@ Use these answers only for features that exist in this repository. Do not claim 
 
 85. **What remains unsafe to claim?**
     Always-on when the PC is off, automatic public tunnels, Web Push on insecure HTTP, or remote shell/OS control — none of those are M9.
+
+### Milestone 10 — Cloud / isolated computers
+
+86. **Control plane vs execution environment?**
+    The control plane is FastAPI + worker + PermissionBroker. The execution environment is the per-teammate computer (browser/workspace). The model proposes tool calls; only the control plane talks to providers.
+
+87. **Why a ComputerProvider protocol?**
+    Swap local_browser, isolated_linux_dev, or a future managed VM without forking AgentRuntime. Contract tests use `mock_cloud` so CI never bills.
+
+88. **VM vs container vs filesystem sandbox?**
+    VM/hypervisor isolation is strongest. Containers share a kernel. Our `isolated_linux_dev` is a host filesystem + profile sandbox — useful for tests, not equivalent to a cloud VM. Label it honestly (`isolation_tier`).
+
+89. **Persistent volume vs ephemeral runtime?**
+    Workspace/artifacts live under the computer root (or a future attached volume). Stopping the browser/process must not delete that data; delete(confirm) does.
+
+90. **Idempotent provisioning?**
+    One computer row per teammate. Repeat provision returns the same id. If status was stuck in `provisioning`, reconcile before creating another resource.
+
+91. **How does human takeover stay safe?**
+    Backend sets control_state, acquires the action lock (safe point), blocks agent browser tools, then allows human. Return control refreshes URL/state and clears stale page assumptions. Takeover ≠ auto-approve consequential tools.
+
+92. **How can work continue when the laptop is shut down?**
+    Only if the control plane (uvicorn + AutomationWorker + DB) and the computer runtime run on always-on infrastructure. A cloud desktop alone with a local worker is insufficient.
+
+93. **Secret isolation?**
+    API keys stay on the control plane env/secret store. Computers must not mount host `.env`, Docker sockets, or cloud control-plane credentials. Previews/logs/artifacts must not echo secrets.
+
+94. **Cost and idle policy?**
+    Defaults: idle stop / max runtime settings exist as knobs. Exact billing enforcement needs provider meter data — do not claim dollar caps without that API. Billable provision is stubbed until owner approval.
+
+95. **What did M10 verify vs not claim?**
+    Verified: provider protocol, mock contracts, isolated_linux_dev provision/health/delete/takeover, ownership, no silent provider migration. Not claimed: a paid cloud VM was created, or shell/OS control is enabled.
