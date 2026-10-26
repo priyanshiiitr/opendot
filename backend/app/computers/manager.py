@@ -19,8 +19,11 @@ from ..config import Settings
 from ..database import ComputerRecord, Teammate
 from .base import LIFECYCLE_STATES
 from .billable_stub import BillableCloudNotConfigured
+from .cloud_sandbox import ISOLATION_NOTE as CLOUD_SANDBOX_NOTE
+from .cloud_sandbox import CloudSandboxComputer, CloudSandboxNotConfigured
 from .context import current_computer_id, current_teammate_id
 from .credit_policy import CreditPolicyError
+from .daytona_client import DaytonaClientError, DaytonaSandboxClient
 from .gcp_client import GcpClientError, GcpComputeClient
 from .gcp_compute import ISOLATION_NOTE as GCP_ISOLATION_NOTE
 from .gcp_compute import GcpComputeComputer
@@ -31,7 +34,9 @@ from .workspace import WorkspaceError, WorkspaceStore
 
 VALID_STATES = LIFECYCLE_STATES | frozenset({"error"})
 
-SUPPORTED_PROVIDERS = frozenset({"local_browser", "isolated_linux_dev", "gcp_compute", "billable_cloud"})
+SUPPORTED_PROVIDERS = frozenset(
+    {"local_browser", "isolated_linux_dev", "gcp_compute", "cloud_sandbox", "billable_cloud"}
+)
 
 ISOLATION_NOTES = {
     "local_browser": (
@@ -40,6 +45,7 @@ ISOLATION_NOTES = {
     ),
     "isolated_linux_dev": ISOLATED_LINUX_NOTE,
     "gcp_compute": GCP_ISOLATION_NOTE,
+    "cloud_sandbox": CLOUD_SANDBOX_NOTE,
     "billable_cloud": (
         "Billable managed cloud — not configured. Explicit provider approval + credentials required."
     ),
@@ -192,7 +198,7 @@ class LocalBrowserComputer:
         return {k: str(v) for k, v in self.paths.items()}
 
 
-LiveComputer = LocalBrowserComputer | IsolatedLinuxDevComputer | GcpComputeComputer
+LiveComputer = LocalBrowserComputer | IsolatedLinuxDevComputer | GcpComputeComputer | CloudSandboxComputer
 
 
 class ComputerManager:
@@ -203,11 +209,13 @@ class ComputerManager:
         policy: NavigationPolicy,
         *,
         gcp_client: GcpComputeClient | None = None,
+        daytona_client: DaytonaSandboxClient | None = None,
     ):
         self.settings = settings
         self.session_factory = session_factory
         self.policy = policy
         self.gcp_client = gcp_client
+        self.daytona_client = daytona_client
         self.root = default_computers_root(settings.computers_root_dir)
         self.root.mkdir(parents=True, exist_ok=True)
         self._live: dict[str, LiveComputer] = {}
@@ -224,13 +232,14 @@ class ComputerManager:
         if name not in SUPPORTED_PROVIDERS:
             raise ComputerError(
                 f"Unsupported computer provider '{name}'. "
-                f"Supported: local_browser, isolated_linux_dev, gcp_compute "
+                f"Supported: local_browser, isolated_linux_dev, gcp_compute, cloud_sandbox "
                 f"(billable_cloud remains refused without separate approval)."
             )
         if name == "billable_cloud":
             raise ComputerError(
                 "billable_cloud refuses paid-resource creation. Use gcp_compute with "
-                "credit-funded mode for the free-trial demo, or keep local providers."
+                "credit-funded mode for the free-trial demo, cloud_sandbox stub for "
+                "Daytona-style planning, or keep local providers."
             )
         return name
 
@@ -239,6 +248,7 @@ class ComputerManager:
             "local_browser": "local_browser",
             "isolated_linux_dev": "filesystem_sandbox",
             "gcp_compute": "vm",
+            "cloud_sandbox": "managed_sandbox",
             "billable_cloud": "managed_cloud",
         }.get(provider, "local_browser")
 
@@ -290,6 +300,14 @@ class ComputerManager:
                 self.settings,
                 client=self.gcp_client,
                 session_factory=self.session_factory,
+            )
+        if record.provider == "cloud_sandbox":
+            return CloudSandboxComputer(
+                record,
+                self.settings,
+                client=self.daytona_client,
+                session_factory=self.session_factory,
+                nav_policy=self.policy,
             )
         if record.provider == "billable_cloud":
             raise ComputerError("Billable cloud provider is not configured.")
@@ -399,6 +417,8 @@ class ComputerManager:
                 "max_runtime_minutes": self.settings.computer_max_runtime_minutes,
                 "billable_allowed": self.settings.computer_allow_billable,
                 "credit_funded_enabled": self.settings.computer_credit_funded_enabled,
+                "cloud_sandbox_enabled": self.settings.computer_cloud_sandbox_enabled,
+                "daytona_max_concurrent_sandboxes": self.settings.daytona_max_concurrent_sandboxes,
                 "gcp_max_concurrent_vms": self.settings.gcp_max_concurrent_vms,
             },
         }
@@ -455,7 +475,7 @@ class ComputerManager:
                     record = db.get(ComputerRecord, computer_id)
                     assert record is not None
                     live = await self._live_for(record)
-                    if isinstance(live, GcpComputeComputer):
+                    if isinstance(live, (GcpComputeComputer, CloudSandboxComputer)):
                         info = await live.provision(confirm_estimate=confirm_estimate)
                     else:
                         info = await live.provision()
@@ -473,8 +493,8 @@ class ComputerManager:
                         status["estimated_cost"] = info.get("estimated_cost")
                         status["message"] = info.get("message")
                         return status
-                    # Merge provider meta carefully for GCP (already saved on live)
-                    if isinstance(live, GcpComputeComputer):
+                    # Merge provider meta carefully — GCP/Daytona already persist on live
+                    if isinstance(live, (GcpComputeComputer, CloudSandboxComputer)):
                         meta_json = live.record.provider_meta_json
                     else:
                         meta_json = json.dumps(
@@ -495,7 +515,13 @@ class ComputerManager:
                     status["idempotent"] = bool(info.get("idempotent"))
                     status["estimated_cost"] = info.get("estimated_cost")
                     return status
-            except (BillableCloudNotConfigured, CreditPolicyError, GcpClientError) as exc:
+            except (
+                BillableCloudNotConfigured,
+                CreditPolicyError,
+                GcpClientError,
+                CloudSandboxNotConfigured,
+                DaytonaClientError,
+            ) as exc:
                 reason = getattr(exc, "reason", str(exc))
                 with self.session_factory() as db:
                     record = db.get(ComputerRecord, computer_id)
@@ -517,8 +543,8 @@ class ComputerManager:
             if record is None:
                 raise ComputerError("Computer not found. Provision or start one for this teammate.")
             live = self._live.get(record.id)
-            if live is None and record.provider == "gcp_compute":
-                # Always probe the real/fake Compute API — filesystem presence is not VM health.
+            if live is None and record.provider in {"gcp_compute", "cloud_sandbox"}:
+                # Always probe the remote API — filesystem presence is not sandbox/VM health.
                 live = await self._live_for(record)
             if live is None:
                 # Cheap filesystem health without starting browser processes.
@@ -690,12 +716,13 @@ class ComputerManager:
         with self.session_factory() as db:
             record = self.get_or_create_record(db, teammate_id)
             live = await self._live_for(record)
-            if record.provider != "gcp_compute" and not live.browser.is_open:
+            # gcp_compute / cloud_sandbox open remote desktop on demand; local needs browser up.
+            if record.provider not in {"gcp_compute", "cloud_sandbox"} and not live.browser.is_open:
                 raise ComputerError("Browser is not open. Start the computer first.")
             try:
                 data = await live.preview()
-            except GcpClientError as exc:
-                raise ComputerError(exc.reason) from exc
+            except (GcpClientError, CloudSandboxNotConfigured, DaytonaClientError) as exc:
+                raise ComputerError(getattr(exc, "reason", str(exc))) from exc
             record.preview_path = str(live.paths["preview"])
             db.commit()
             return data

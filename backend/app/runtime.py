@@ -31,18 +31,38 @@ class AgentRuntime:
     def set_skill_categories(self, categories: list[str] | None) -> None:
         self._skill_categories = categories
 
+    def _computer_environment_hint(self, db: Session, teammate_id: int) -> str:
+        """Honest tool guidance when the teammate computer is a Daytona sandbox."""
+        if self.computer_manager is None:
+            return ""
+        record = self.computer_manager.get_record(db, teammate_id)
+        if record is None or record.provider != "cloud_sandbox":
+            return ""
+        return (
+            "\n\n## Computer environment\n"
+            "This teammate uses a Daytona `cloud_sandbox` desktop (not local Playwright).\n"
+            "Prefer: `desktop_open_url`, `desktop_screenshot`, `desktop_click`, "
+            "`desktop_type`, `desktop_hotkey`.\n"
+            "Do not rely on `browser_*` tools for this teammate — they target local_browser only.\n"
+            "After opening a URL, take a screenshot before clicking so you can choose coordinates."
+        )
+
     def _system_prompt(self, db: Session, conversation: Conversation, user_query: str = "") -> str:
         base = conversation.teammate.system_prompt
+        hint = self._computer_environment_hint(db, conversation.teammate_id)
         if self.memory_service is None:
-            return base
+            return f"{base}{hint}"
         rows = self.memory_service.retrieve_for_task(
             db, teammate_id=conversation.teammate_id, query=user_query
         )
         block, ids = self.memory_service.format_for_prompt(rows)
         self._last_memory_ids = ids
-        if not block:
-            return base
-        return f"{base}\n\n{block}"
+        parts = [base]
+        if block:
+            parts.append(block)
+        if hint:
+            parts.append(hint.strip())
+        return "\n\n".join(parts)
 
     def _bind_computer(self, conversation: Conversation):
         if self.computer_manager is None:

@@ -57,7 +57,9 @@ class ComputerStatusOut(BaseModel):
 
 
 class ComputerProvisionRequest(BaseModel):
-    provider: Literal["local_browser", "isolated_linux_dev", "gcp_compute", "billable_cloud"] | None = None
+    provider: (
+        Literal["local_browser", "isolated_linux_dev", "gcp_compute", "cloud_sandbox", "billable_cloud"] | None
+    ) = None
     confirm_estimate: bool = False
 
 class MessageOut(BaseModel):
