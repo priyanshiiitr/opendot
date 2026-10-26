@@ -21,8 +21,10 @@ $RepoUrl = "https://github.com/priyanshiiitr/opendot.git"
 $RepoBranch = "m10-cloud-computers"
 
 Write-Host "Activating service account..."
-& $Gcloud auth activate-service-account --key-file="$Cred" 2>$null | Out-Null
-& $Gcloud config set project $Project 2>$null | Out-Null
+$ErrorActionPreference = "Continue"
+& $Gcloud auth activate-service-account --key-file="$Cred" | Out-Null
+& $Gcloud config set project $Project | Out-Null
+$ErrorActionPreference = "Stop"
 
 # Base64 of SA JSON for metadata (single-line)
 $SaB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($Cred))
@@ -63,6 +65,8 @@ if ($exists) {
     Write-Host "Creating control-plane VM $Instance ..."
     $SaMeta = Join-Path $env:TEMP "aitm-sa-b64.txt"
     Set-Content -Path $SaMeta -Value $SaB64 -Encoding ascii -NoNewline
+    # No VM service account attached: our creator SA lacks iam.serviceAccountUser.
+    # App still authenticates to GCP via SA JSON from metadata (aitm-sa-b64).
     & $Gcloud compute instances create $Instance `
         --project=$Project `
         --zone=$Zone `
@@ -72,8 +76,8 @@ if ($exists) {
         --boot-disk-size=30GB `
         --boot-disk-type=pd-balanced `
         --tags=aitm-control `
-        --service-account=$SaEmail `
-        --scopes=https://www.googleapis.com/auth/cloud-platform `
+        --no-service-account `
+        --no-scopes `
         --labels=ai-teammates=control-plane,role=control-plane `
         --metadata="aitm-repo-url=$RepoUrl,aitm-repo-branch=$RepoBranch" `
         --metadata-from-file="startup-script=$StartupLf,aitm-sa-b64=$SaMeta"
@@ -81,6 +85,12 @@ if ($exists) {
 
 Write-Host "Waiting for external IP..."
 $ip = $null
+$ErrorActionPreference = "Continue"
+$created = & $Gcloud compute instances describe $Instance --zone=$Zone --format="value(name)" 2>$null
+$ErrorActionPreference = "Stop"
+if (-not $created) {
+    throw "Control-plane VM was not created. See gcloud errors above."
+}
 for ($i = 0; $i -lt 36; $i++) {
     $ErrorActionPreference = "Continue"
     $ip = & $Gcloud compute instances describe $Instance --zone=$Zone --format="value(networkInterfaces[0].accessConfigs[0].natIP)" 2>$null
