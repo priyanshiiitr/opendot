@@ -48,7 +48,7 @@ export type ConnectorStatus = {
   token_configured: boolean
 }
 
-const API = 'http://127.0.0.1:8000'
+const API = (import.meta.env.VITE_API_BASE as string | undefined)?.trim() || 'http://127.0.0.1:8010'
 const SESSION_KEY = 'ai_teammates_session'
 
 export function getSessionToken(): string | null {
@@ -68,10 +68,25 @@ export function setSessionToken(token: string | null) {
   }
 }
 
-function authHeaders(extra?: HeadersInit): HeadersInit {
+let clerkTokenGetter: (() => Promise<string | null>) | null = null
+
+/** Used by MaybeClerkProvider to attach Clerk session JWTs as Bearer tokens. */
+export function setClerkTokenGetter(getter: (() => Promise<string | null>) | null) {
+  clerkTokenGetter = getter
+}
+
+async function authHeaders(extra?: HeadersInit): Promise<HeadersInit> {
   const token = getSessionToken()
   const headers: Record<string, string> = { ...(extra as Record<string, string>) }
   if (token) headers['X-AI-Teammates-Session'] = token
+  if (clerkTokenGetter) {
+    try {
+      const clerk = await clerkTokenGetter()
+      if (clerk) headers['Authorization'] = `Bearer ${clerk}`
+    } catch {
+      /* ignore */
+    }
+  }
   return headers
 }
 
@@ -110,17 +125,37 @@ export function isSuccessfulTerminal(event: StreamEvent): boolean {
   return event.type === 'done' || event.type === 'approval_required'
 }
 
+/** Turn FastAPI `{"detail":"..."}` (and similar) into a human-readable message. */
+export function formatApiError(raw: string, status?: number): string {
+  const text = (raw || '').trim()
+  if (!text) return status ? `Request failed (${status})` : 'Request failed'
+  try {
+    const parsed = JSON.parse(text) as { detail?: unknown; message?: unknown; error?: unknown }
+    const detail = parsed.detail ?? parsed.message ?? parsed.error
+    if (typeof detail === 'string' && detail.trim()) return detail.trim()
+    if (Array.isArray(detail)) {
+      return detail
+        .map((item) => (typeof item === 'object' && item && 'msg' in item ? String((item as { msg: unknown }).msg) : String(item)))
+        .filter(Boolean)
+        .join('; ')
+    }
+  } catch {
+    /* not JSON */
+  }
+  return text
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = authHeaders(init?.headers)
+  const headers = await authHeaders(init?.headers)
   const response = await fetch(API + path, { ...init, headers })
-  if (!response.ok) throw new Error((await response.text()) || `Request failed (${response.status})`)
+  if (!response.ok) throw new Error(formatApiError(await response.text(), response.status))
   return response.json()
 }
 
 async function* stream(path: string, init: RequestInit): AsyncGenerator<StreamEvent> {
-  const headers = authHeaders(init.headers)
+  const headers = await authHeaders(init.headers)
   const response = await fetch(API + path, { ...init, headers })
-  if (!response.ok || !response.body) throw new Error(await response.text())
+  if (!response.ok || !response.body) throw new Error(formatApiError(await response.text(), response.status))
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -158,6 +193,8 @@ export type ComputerStatus = {
     max_runtime_minutes?: number
     billable_allowed?: boolean
     credit_funded_enabled?: boolean
+    cloud_sandbox_enabled?: boolean
+    daytona_max_concurrent_sandboxes?: number
     gcp_max_concurrent_vms?: number
   }
   health?: { healthy?: boolean; note?: string; browser_process_alive?: boolean }
@@ -166,7 +203,9 @@ export type ComputerStatus = {
   requires_confirmation?: boolean
   estimated_cost?: {
     machine_type?: string
-    usd_per_hour_approx?: number
+    provider?: string
+    vendor?: string
+    usd_per_hour_approx?: number | null
     notes?: string[]
   }
 }
@@ -182,7 +221,7 @@ export const api = {
   computer: (teammateId: number) => request<ComputerStatus>(`/api/teammates/${teammateId}/computer`),
   provisionComputer: (
     teammateId: number,
-    provider?: 'local_browser' | 'isolated_linux_dev' | 'gcp_compute',
+    provider?: 'local_browser' | 'isolated_linux_dev' | 'gcp_compute' | 'cloud_sandbox',
     confirmEstimate = false,
   ) =>
     request<ComputerStatus>(`/api/teammates/${teammateId}/computer/provision`, {
@@ -215,7 +254,7 @@ export const api = {
   clearComputerBrowser: (teammateId: number) =>
     request<ComputerStatus>(`/api/teammates/${teammateId}/computer/clear-browser?confirm=true`, { method: 'POST' }),
   computerPreviewUrl: (teammateId: number) =>
-    `http://127.0.0.1:8000/api/teammates/${teammateId}/computer/preview?ts=${Date.now()}`,
+    `${API}/api/teammates/${teammateId}/computer/preview?ts=${Date.now()}`,
   workspaceFiles: (teammateId: number, area: 'workspace' | 'artifacts' = 'workspace') =>
     request<{ area: string; files: { path: string; bytes: number; suffix: string }[] }>(
       `/api/teammates/${teammateId}/workspace?area=${area}`,
@@ -252,6 +291,14 @@ export const api = {
     }),
   verifyTelegram: () => request<ConnectorStatus>('/api/connectors/telegram/verify', { method: 'POST' }),
   disconnectTelegram: () => request<ConnectorStatus>('/api/connectors/telegram/disconnect', { method: 'POST' }),
+  oauthAuthorize: (id: 'github' | 'gmail') =>
+    request<{ authorize_url: string; state: string }>(`/api/connectors/${id}/authorize`),
+  oauthDisconnect: (id: 'github' | 'gmail') =>
+    request<ConnectorStatus>(`/api/connectors/${id}/disconnect`, { method: 'POST' }),
+  oauthVerify: (id: 'github' | 'gmail') =>
+    request<ConnectorStatus>(`/api/connectors/${id}/verify`, { method: 'POST' }),
+  durableEnqueueTest: () => request<{ ok: boolean; remote_id: string; backend: string }>('/api/internal/durable/enqueue-test', { method: 'POST' }),
+
   automations: () => request<Automation[]>('/api/automations'),
   createAutomation: (body: AutomationCreate) =>
     request<Automation>('/api/automations', {

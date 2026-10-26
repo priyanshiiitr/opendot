@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
+import { Show, SignInButton, UserButton } from '@clerk/react'
 import {
   api,
   AppNotification,
@@ -28,6 +29,7 @@ import {
   toActivity,
   WorkflowRun,
 } from './api'
+import { MaybeClerkProvider, clerkConfigured } from './clerk'
 import './styles.css'
 
 type View = 'chat' | 'automations' | 'computer' | 'memory' | 'skills' | 'workflows' | 'teams' | 'companion' | 'ops'
@@ -171,6 +173,113 @@ function ConnectionsPanel({
         </div>
         {note && <p className="connection-note">{note}</p>}
       </div>
+      <OAuthConnectorsPanel />
+    </div>
+  )
+}
+
+function OAuthConnectorsPanel() {
+  const [items, setItems] = useState<ConnectorStatus[]>([])
+  const [busy, setBusy] = useState<string | null>(null)
+  const [note, setNote] = useState('')
+
+  async function refresh() {
+    try {
+      const all = await api.connectors()
+      setItems(all.filter((c) => c.id === 'github' || c.id === 'gmail'))
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : 'Could not load OAuth connectors')
+    }
+  }
+
+  useEffect(() => {
+    void refresh()
+  }, [])
+
+  function oauthReady(c: ConnectorStatus): boolean {
+    const msg = (c.message || '').toLowerCase()
+    if (c.connected) return true
+    if (msg.includes('refuses') || msg.includes('missing') || msg.includes('not ready')) return false
+    // Credentials present but not connected yet → Connect is allowed
+    return c.token_configured || msg.includes('configured') || msg.includes('authorize')
+  }
+
+  async function connect(id: 'github' | 'gmail') {
+    const row = items.find((c) => c.id === id)
+    if (row && !oauthReady(row)) {
+      setNote(
+        `${row.display_name} is not configured yet. Set AI_TEAMMATES_OAUTH_CONNECTORS_ENABLED=true and the client id/secret in backend/.env, restart the API, then Refresh.`,
+      )
+      return
+    }
+    setBusy(id)
+    setNote('')
+    try {
+      const { authorize_url } = await api.oauthAuthorize(id)
+      window.open(authorize_url, '_blank', 'noopener,noreferrer')
+      setNote(`Browser opened for ${id}. After approving, return here and click Refresh.`)
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : `Could not start ${id} OAuth`)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className="connection-card" style={{ marginTop: 12 }}>
+      <strong>GitHub / Gmail (OAuth)</strong>
+      <small>
+        Optional. Needs OAuth apps + <code>AI_TEAMMATES_OAUTH_CONNECTORS_ENABLED=true</code>. Skip for the local demo —
+        Chat / Computer / Memory work without them.
+      </small>
+      {items.map((c) => {
+        const ready = oauthReady(c)
+        return (
+          <div key={c.id} style={{ marginTop: 8 }}>
+            <strong>{c.display_name}</strong>
+            <small>{c.connected ? 'Connected' : ready ? c.message : 'Not configured (optional for local demo)'}</small>
+            <div className="connection-actions">
+              <button disabled={busy !== null || !ready} onClick={() => void connect(c.id as 'github' | 'gmail')}>
+                Connect
+              </button>
+              <button
+                disabled={busy !== null || !c.connected}
+                onClick={() => void api.oauthVerify(c.id as 'github' | 'gmail').then(refresh)}
+              >
+                Verify
+              </button>
+              <button
+                className="reject"
+                disabled={busy !== null || !c.connected}
+                onClick={() => void api.oauthDisconnect(c.id as 'github' | 'gmail').then(refresh)}
+              >
+                Disconnect
+              </button>
+            </div>
+          </div>
+        )
+      })}
+      <button disabled={busy !== null} onClick={() => void refresh()} style={{ marginTop: 8 }}>
+        Refresh
+      </button>
+      {note && <p className="connection-note">{note}</p>}
+    </div>
+  )
+}
+
+function ClerkBar() {
+  if (!clerkConfigured()) return null
+  return (
+    <div className="connection-card" style={{ marginBottom: 12 }}>
+      <strong>Clerk</strong>
+      <Show when="signed-out">
+        <SignInButton mode="modal">
+          <button type="button">Sign in</button>
+        </SignInButton>
+      </Show>
+      <Show when="signed-in">
+        <UserButton />
+      </Show>
     </div>
   )
 }
@@ -245,9 +354,35 @@ function ComputerPanel({
     }
   }
 
+  async function switchProvider(
+    provider: 'local_browser' | 'isolated_linux_dev' | 'gcp_compute' | 'cloud_sandbox',
+    run: () => Promise<void>,
+  ) {
+    if (!teammate) return
+    const current = status?.provider
+    if (current && current !== provider) {
+      const ok = window.confirm(
+        `This teammate already uses provider "${current}".\n\nSwitching to "${provider}" deletes the existing computer (workspace/profile for that computer). Continue?`,
+      )
+      if (!ok) return
+      setBusy(true)
+      try {
+        await api.deleteComputer(teammate.id)
+        await refresh()
+      } catch (e) {
+        onError(e instanceof Error ? e.message : 'Could not delete existing computer before switch')
+        setBusy(false)
+        return
+      }
+      setBusy(false)
+    }
+    await run()
+  }
+
   if (!teammate) return <div className="empty"><h2>Select a teammate</h2></div>
 
   const human = status?.human_control || status?.state === 'human_control'
+  const currentProvider = status?.provider || null
 
   return (
     <section className="computer-panel">
@@ -264,13 +399,27 @@ function ComputerPanel({
             {status?.isolation_tier ? ` · ${status.isolation_tier.replaceAll('_', ' ')}` : ''}
           </p>
           <p className="connection-help">{status?.isolation_note}</p>
+          {currentProvider && (
+            <p className="connection-help">
+              Tip: use <strong>Start</strong> for the current provider. Other Provision buttons will ask to delete &amp; switch.
+            </p>
+          )}
           <div className="connection-actions">
-            <button disabled={busy} onClick={() => act(() => api.provisionComputer(teammate.id, 'local_browser'))}>
-              Provision local
+            <button
+              disabled={busy}
+              onClick={() =>
+                void switchProvider('local_browser', () => act(() => api.provisionComputer(teammate.id, 'local_browser')))
+              }
+            >
+              {currentProvider === 'local_browser' ? 'Re-provision local' : 'Provision local'}
             </button>
             <button
               disabled={busy}
-              onClick={() => act(() => api.provisionComputer(teammate.id, 'isolated_linux_dev'))}
+              onClick={() =>
+                void switchProvider('isolated_linux_dev', () =>
+                  act(() => api.provisionComputer(teammate.id, 'isolated_linux_dev')),
+                )
+              }
               title="Filesystem sandbox on this host — not a billable cloud VM"
             >
               Provision isolated Linux-dev
@@ -279,7 +428,7 @@ function ComputerPanel({
               disabled={busy}
               title="Credit-funded Google Compute Engine — estimate required before create"
               onClick={() => {
-                void (async () => {
+                void switchProvider('gcp_compute', async () => {
                   setBusy(true)
                   try {
                     const estimate = await api.provisionComputer(teammate.id, 'gcp_compute', false)
@@ -297,10 +446,41 @@ function ComputerPanel({
                   } finally {
                     setBusy(false)
                   }
-                })()
+                })
               }}
             >
               Provision GCP (credit-funded)
+            </button>
+            <button
+              disabled={busy || status?.limits?.cloud_sandbox_enabled === false}
+              title={
+                status?.limits?.cloud_sandbox_enabled === false
+                  ? 'Set AI_TEAMMATES_COMPUTER_CLOUD_SANDBOX_ENABLED=true and DAYTONA_API_KEY in backend/.env'
+                  : 'Daytona managed sandbox (free/credit wallet) — confirm estimate before create'
+              }
+              onClick={() => {
+                void switchProvider('cloud_sandbox', async () => {
+                  setBusy(true)
+                  try {
+                    const estimate = await api.provisionComputer(teammate.id, 'cloud_sandbox', false)
+                    setStatus(estimate)
+                    const notes = (estimate.estimated_cost?.notes || []).slice(0, 3).join(' ')
+                    const line = notes
+                      ? `Create a Daytona cloud_sandbox for this teammate?\n\n${notes}\n\nMax ${estimate.limits?.daytona_max_concurrent_sandboxes ?? 1} concurrent.`
+                      : 'Create a Daytona cloud_sandbox (uses free/credit wallet; not public VNC)?'
+                    if (estimate.requires_confirmation && window.confirm(line)) {
+                      setStatus(await api.provisionComputer(teammate.id, 'cloud_sandbox', true))
+                    }
+                    await refresh()
+                  } catch (e) {
+                    onError(e instanceof Error ? e.message : 'Daytona provision failed')
+                  } finally {
+                    setBusy(false)
+                  }
+                })
+              }}
+            >
+              Provision Daytona sandbox
             </button>
             <button
               disabled={busy}
@@ -378,11 +558,26 @@ function ComputerPanel({
             </p>
           )}
           {status?.last_error && <p className="connection-warn">{status.last_error}</p>}
+          {status?.provider === 'cloud_sandbox' && (
+            <p className="connection-help">
+              Daytona desktop: Start → preview. Agent tools:{' '}
+              <code>desktop_open_url</code>, <code>desktop_screenshot</code>,{' '}
+              <code>desktop_click</code>, <code>desktop_type</code> (click/type need approval). Playwright{' '}
+              <code>browser_*</code> stays on local_browser.
+            </p>
+          )}
           <div className="preview-frame">
             {preview && status?.browser_open ? (
-              <img src={preview} alt="Teammate browser preview" />
+              <img
+                src={preview}
+                alt={status?.provider === 'cloud_sandbox' ? 'Daytona desktop preview' : 'Teammate browser preview'}
+              />
             ) : (
-              <div className="preview-empty">Preview appears when the browser is open.</div>
+              <div className="preview-empty">
+                {status?.provider === 'cloud_sandbox'
+                  ? 'Preview appears after Start (Daytona computer_use desktop).'
+                  : 'Preview appears when the browser is open.'}
+              </div>
             )}
           </div>
         </div>
@@ -1396,7 +1591,9 @@ function AutomationsPanel({
   async function makeWebhook() {
     if (!selectedId) return
     const created = await api.createWebhook(selectedId)
-    setWebhookSecret(`POST http://127.0.0.1:8000${created.path}\nBearer ${created.secret}\n(${created.message})`)
+    setWebhookSecret(
+      `POST ${(import.meta.env.VITE_API_BASE as string | undefined)?.trim() || 'http://127.0.0.1:8010'}${created.path}\nBearer ${created.secret}\n(${created.message})`,
+    )
   }
 
   return (
@@ -1538,13 +1735,17 @@ function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([])
 
   useEffect(() => {
+    setError('')
+  }, [view])
+
+  useEffect(() => {
     api
       .teammates()
       .then((t) => {
         setTeammates(t)
         setSelected(t[0])
       })
-      .catch((e) => setError(e.message))
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
     api.telegramStatus().then(setTelegram).catch(() => setTelegram(null))
     let seenNotice = ''
     const poll = setInterval(() => {
@@ -1755,6 +1956,7 @@ function App() {
             <small>health · pairing</small>
           </span>
         </button>
+        <ClerkBar />
         <ConnectionsPanel status={telegram} onChanged={setTelegram} />
         {notifications.length > 0 && (
           <div className="connections">
@@ -1813,7 +2015,14 @@ function App() {
                 </div>
               )}
             </section>
-            {error && <div className="error">{error}</div>}
+            {error && (
+              <div className="error" role="alert">
+                {error}
+                <button type="button" className="reject" style={{ marginLeft: 12 }} onClick={() => setError('')}>
+                  Dismiss
+                </button>
+              </div>
+            )}
             <form
               className="composer"
               onSubmit={(e) => {
@@ -1848,7 +2057,14 @@ function App() {
                 <i /> background worker
               </span>
             </header>
-            {error && <div className="error">{error}</div>}
+            {error && (
+              <div className="error" role="alert">
+                {error}
+                <button type="button" className="reject" style={{ marginLeft: 12 }} onClick={() => setError('')}>
+                  Dismiss
+                </button>
+              </div>
+            )}
             <AutomationsPanel teammates={teammates} onError={setError} />
           </>
         ) : view === 'memory' ? (
@@ -1862,7 +2078,14 @@ function App() {
                 <i /> scoped · inspectable
               </span>
             </header>
-            {error && <div className="error">{error}</div>}
+            {error && (
+              <div className="error" role="alert">
+                {error}
+                <button type="button" className="reject" style={{ marginLeft: 12 }} onClick={() => setError('')}>
+                  Dismiss
+                </button>
+              </div>
+            )}
             <MemoryPanel teammate={selected ?? null} onError={setError} />
           </>
         ) : view === 'skills' ? (
@@ -1876,7 +2099,14 @@ function App() {
                 <i /> reviewed before enable
               </span>
             </header>
-            {error && <div className="error">{error}</div>}
+            {error && (
+              <div className="error" role="alert">
+                {error}
+                <button type="button" className="reject" style={{ marginLeft: 12 }} onClick={() => setError('')}>
+                  Dismiss
+                </button>
+              </div>
+            )}
             <SkillsPanel teammate={selected ?? null} onError={setError} />
           </>
         ) : view === 'workflows' ? (
@@ -1890,7 +2120,14 @@ function App() {
                 <i /> checkpoints · verify
               </span>
             </header>
-            {error && <div className="error">{error}</div>}
+            {error && (
+              <div className="error" role="alert">
+                {error}
+                <button type="button" className="reject" style={{ marginLeft: 12 }} onClick={() => setError('')}>
+                  Dismiss
+                </button>
+              </div>
+            )}
             <WorkflowsPanel teammate={selected ?? null} onError={setError} />
           </>
         ) : view === 'teams' ? (
@@ -1904,7 +2141,14 @@ function App() {
                 <i /> bounded delegation
               </span>
             </header>
-            {error && <div className="error">{error}</div>}
+            {error && (
+              <div className="error" role="alert">
+                {error}
+                <button type="button" className="reject" style={{ marginLeft: 12 }} onClick={() => setError('')}>
+                  Dismiss
+                </button>
+              </div>
+            )}
             <TeamsPanel teammates={teammates} onError={setError} />
           </>
         ) : view === 'companion' ? (
@@ -1918,7 +2162,14 @@ function App() {
                 <i /> session ≠ task cancel
               </span>
             </header>
-            {error && <div className="error">{error}</div>}
+            {error && (
+              <div className="error" role="alert">
+                {error}
+                <button type="button" className="reject" style={{ marginLeft: 12 }} onClick={() => setError('')}>
+                  Dismiss
+                </button>
+              </div>
+            )}
             <CompanionPanel teammates={teammates} onError={setError} />
           </>
         ) : view === 'ops' ? (
@@ -1932,7 +2183,14 @@ function App() {
                 <i /> service health
               </span>
             </header>
-            {error && <div className="error">{error}</div>}
+            {error && (
+              <div className="error" role="alert">
+                {error}
+                <button type="button" className="reject" style={{ marginLeft: 12 }} onClick={() => setError('')}>
+                  Dismiss
+                </button>
+              </div>
+            )}
             <OpsPanel onError={setError} />
           </>
         ) : (
@@ -1946,7 +2204,14 @@ function App() {
                 <i /> local browser profile
               </span>
             </header>
-            {error && <div className="error">{error}</div>}
+            {error && (
+              <div className="error" role="alert">
+                {error}
+                <button type="button" className="reject" style={{ marginLeft: 12 }} onClick={() => setError('')}>
+                  Dismiss
+                </button>
+              </div>
+            )}
             <ComputerPanel teammate={selected} onError={setError} />
           </>
         )}
@@ -1957,6 +2222,8 @@ function App() {
 
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <App />
+    <MaybeClerkProvider>
+      <App />
+    </MaybeClerkProvider>
   </React.StrictMode>,
 )

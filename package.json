@@ -3,7 +3,32 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "scripts": {"dev": "concurrently -k \"npm run dev:web\" \"npm run dev:electron\"", "dev:web": "vite", "dev:electron": "wait-on http://localhost:5173 && electron electron/main.cjs", "build": "tsc && vite build", "test": "vitest run"},
-  "dependencies": {"@vitejs/plugin-react": "^4.3.4", "concurrently": "^9.1.0", "electron": "^33.2.1", "react": "^18.3.1", "react-dom": "^18.3.1", "vite": "^6.1.0", "vitest": "^2.1.8", "wait-on": "^8.0.1", "typescript": "^5.7.2", "jsdom": "^25.0.1"},
-  "devDependencies": {"@types/react": "^18.3.18", "@types/react-dom": "^18.3.5"}
+  "scripts": {
+    "dev": "concurrently -k \"npm run dev:web\" \"npm run dev:electron\"",
+    "dev:web": "vite",
+    "dev:electron": "wait-on http://localhost:5173 && electron electron/main.cjs",
+    "build": "tsc && vite build",
+    "test": "vitest run",
+    "dev:trigger": "npx trigger.dev@latest dev",
+    "deploy:trigger": "npx trigger.dev@latest deploy"
+  },
+  "dependencies": {
+    "@clerk/react": "^6.18.1",
+    "@trigger.dev/sdk": "4.8.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "electron": "^33.2.1",
+    "jsdom": "^25.0.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.1.0",
+    "vitest": "^2.1.8",
+    "wait-on": "^8.0.1"
+  },
+  "devDependencies": {
+    "@trigger.dev/build": "4.8.1",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5"
+  }
 }
