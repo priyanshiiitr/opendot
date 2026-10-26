@@ -26,4 +26,5 @@ backend/neon.url.txt
 # Root env for TRIGGER_SECRET_KEY (never commit)
 .env
 .env.local
+scripts/gcp/last-deploy.log
 
