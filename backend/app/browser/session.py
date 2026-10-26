@@ -73,7 +73,8 @@ class BrowserService:
             return
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self.user_data_dir / ".ai_teammates_profile.lock"
-        try:
+
+        def _try_lock() -> None:
             handle = open(lock_path, "a+b")
             if hasattr(handle, "seek"):
                 handle.seek(0)
@@ -86,10 +87,29 @@ class BrowserService:
 
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             self._profile_lock_handle = handle
-        except OSError as exc:
-            raise BrowserServiceError(
-                "This computer's browser profile is already in use by another process."
-            ) from exc
+
+        try:
+            _try_lock()
+        except OSError:
+            # Stale lock after a crashed backend: remove and retry once.
+            try:
+                if self._profile_lock_handle is None and lock_path.exists():
+                    lock_path.unlink(missing_ok=True)  # type: ignore[call-arg]
+            except TypeError:
+                try:
+                    if lock_path.exists():
+                        lock_path.unlink()
+                except OSError:
+                    pass
+            except OSError:
+                pass
+            try:
+                _try_lock()
+            except OSError as exc:
+                raise BrowserServiceError(
+                    "This computer's browser profile is already in use by another process. "
+                    "Click Close browser, wait a few seconds, then Start again."
+                ) from exc
 
     def _release_profile_lock(self) -> None:
         handle = self._profile_lock_handle
