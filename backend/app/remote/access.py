@@ -48,28 +48,48 @@ def authorize_request(
     db: Session,
     settings: Settings,
     remote: RemoteAccessService,
+    clerk=None,
 ) -> DeviceSession | None:
-    """Return session when authenticated; None when local trust applies.
+    """Return session when authenticated; None when local trust or Clerk applies.
 
     Raises HTTPException when remote access requires auth and it is missing/invalid.
     """
     path = request.url.path
+    request.state.clerk_claims = None
     if path in PUBLIC_EXACT or any(path.startswith(p) for p in PUBLIC_PREFIXES):
         return None
     if path == "/api/remote/pairing/start":
         if not is_loopback(request):
             raise HTTPException(403, "Pairing must be started from the trusted local desktop (loopback).")
         return None
-    if not settings.remote_access_enabled:
+    if not settings.remote_access_enabled and not settings.clerk_enabled:
         return None
     if settings.local_trust_loopback and is_loopback(request):
         return None
+    # Clerk-only mode without remote_access: still require auth off-loopback when enabled.
+    if not settings.remote_access_enabled and settings.clerk_enabled:
+        if not remote.rate.allow(f"auth:{client_ip(request)}", settings.auth_rate_limit_per_minute):
+            raise HTTPException(429, "Too many requests.")
+        token = extract_bearer(request)
+        if clerk is None:
+            raise HTTPException(401, "Clerk auth enabled but not configured on the server.")
+        try:
+            request.state.clerk_claims = clerk.verify_bearer(token)
+            return None
+        except Exception as exc:
+            raise HTTPException(401, getattr(exc, "reason", str(exc))) from exc
 
     if not remote.rate.allow(f"auth:{client_ip(request)}", settings.auth_rate_limit_per_minute):
         raise HTTPException(429, "Too many requests.")
 
     token = extract_bearer(request)
     session = remote.resolve_session(db, token)
-    if session is None:
-        raise HTTPException(401, "Authentication required. Pair a device or use a valid session.")
-    return session
+    if session is not None:
+        return session
+    if settings.clerk_enabled and clerk is not None:
+        try:
+            request.state.clerk_claims = clerk.verify_bearer(token)
+            return None
+        except Exception:
+            pass
+    raise HTTPException(401, "Authentication required. Pair a device, use a session, or a Clerk Bearer token.")
