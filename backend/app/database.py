@@ -220,12 +220,16 @@ class SecurityAuditEvent(Base):
 
 
 class ComputerRecord(Base):
-    """Persistent metadata for a teammate's isolated local browser computer."""
+    """Persistent metadata for a teammate's computer (local browser or isolated Linux-dev)."""
 
     __tablename__ = "computers"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     teammate_id: Mapped[int] = mapped_column(ForeignKey("teammates.id"), unique=True)
     provider: Mapped[str] = mapped_column(String(40), default="local_browser")
+    isolation_tier: Mapped[str] = mapped_column(String(40), default="local_browser")
+    control_state: Mapped[str] = mapped_column(String(40), default="agent_control")
+    external_ref: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    provider_meta_json: Mapped[str] = mapped_column(Text, default="{}")
     state: Mapped[str] = mapped_column(String(40), default="stopped")
     root_path: Mapped[str] = mapped_column(Text, default="")
     last_url: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -417,12 +421,21 @@ class TeamEvent(Base):
 
 def _engine_url() -> str:
     settings = get_settings()
-    if settings.database_url.startswith("sqlite:///./"):
+    url = (settings.database_url or "").strip().strip("'\"")
+    if url.startswith("sqlite:///./"):
         Path("data").mkdir(exist_ok=True)
-    return settings.database_url
+    return url
 
 
-engine = create_engine(_engine_url(), connect_args={"check_same_thread": False})
+def _connect_args(url: str) -> dict:
+    # SQLite-only; Postgres/Neon reject check_same_thread.
+    if url.startswith("sqlite"):
+        return {"check_same_thread": False}
+    return {}
+
+
+_ENGINE_URL = _engine_url()
+engine = create_engine(_ENGINE_URL, connect_args=_connect_args(_ENGINE_URL))
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 

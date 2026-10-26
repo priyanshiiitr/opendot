@@ -26,6 +26,8 @@ class ComputerStatusOut(BaseModel):
     id: str
     teammate_id: int
     provider: str
+    isolation_tier: str = "local_browser"
+    control_state: str = "agent_control"
     state: str
     human_control: bool
     last_url: str | None = None
@@ -39,10 +41,26 @@ class ComputerStatusOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     isolation_note: str = ""
+    limits: dict[str, Any] | None = None
+    health: dict[str, Any] | None = None
+    provision: dict[str, Any] | None = None
+    idempotent: bool | None = None
     takeover: dict[str, Any] | None = None
     release: dict[str, Any] | None = None
     cleared: bool | None = None
+    deleted: bool | None = None
+    detail: dict[str, Any] | None = None
     message: str | None = None
+    computer_id: str | None = None
+    requires_confirmation: bool | None = None
+    estimated_cost: dict[str, Any] | None = None
+
+
+class ComputerProvisionRequest(BaseModel):
+    provider: (
+        Literal["local_browser", "isolated_linux_dev", "gcp_compute", "cloud_sandbox", "billable_cloud"] | None
+    ) = None
+    confirm_estimate: bool = False
 
 class MessageOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)

@@ -48,6 +48,52 @@ class Settings(BaseSettings):
     computer_preview_min_interval_ms: int = 1500
     computer_max_file_bytes: int = 256_000
     computer_headless_default: bool = True
+    # Milestone 10 — provider: local_browser | isolated_linux_dev | gcp_compute | cloud_sandbox
+    computer_default_provider: str = "local_browser"
+    # Paid out-of-pocket path — must stay false unless separately authorized.
+    computer_allow_billable: bool = False
+    # Credit-funded GCP demo path (free trial / promotional credits). Separate from billable.
+    computer_credit_funded_enabled: bool = False
+    # Daytona managed sandbox (free/credit wallet). Default off until key + explicit enable.
+    computer_cloud_sandbox_enabled: bool = False
+    computer_idle_stop_minutes: int = 30
+    computer_max_runtime_minutes: int = 240
+    # Daytona — prefer DAYTONA_API_KEY in .env; AI_TEAMMATES_DAYTONA_API_KEY also works. Never commit.
+    daytona_api_key: str = ""
+    daytona_api_url: str = ""  # default SDK: https://app.daytona.io/api
+    daytona_target: str = ""  # optional region
+    daytona_max_concurrent_sandboxes: int = 1
+    # Google Compute Engine (credentials via ADC or credentials file path — never commit secrets)
+    gcp_project_id: str = ""
+    gcp_zone: str = "us-central1-a"
+    gcp_machine_type: str = "e2-micro"
+    gcp_allowed_machine_types: str = "e2-micro,e2-small"
+    gcp_boot_disk_gb: int = 20
+    gcp_max_concurrent_vms: int = 1
+    gcp_control_plane_url: str = ""  # https://… always-on API the guest agent pulls from
+    gcp_credentials_file: str = ""  # optional path to SA JSON; prefer ADC / secret mount
+    # Durable execution backend: in_process (default) | external_stub | trigger_http
+    durable_execution_backend: str = "in_process"
+    durable_external_backend_enabled: bool = False
+    # Trigger.dev-style HTTP enqueue (only when backend=trigger_http + external enabled)
+    trigger_webhook_url: str = ""
+    trigger_webhook_secret: str = ""
+    # Optional Clerk auth (off by default). Local pairing remains primary.
+    clerk_enabled: bool = False
+    clerk_jwks_url: str = ""  # e.g. https://<clerk-domain>/.well-known/jwks.json
+    clerk_issuer: str = ""  # e.g. https://<clerk-domain>
+    clerk_audience: str = ""
+    # Optional OAuth connectors (Gmail/GitHub) — refuse until enabled + client id/secret set
+    oauth_connectors_enabled: bool = False
+    oauth_redirect_base: str = "http://127.0.0.1:8000"
+    github_oauth_client_id: str = ""
+    github_oauth_client_secret: str = ""
+    gmail_oauth_client_id: str = ""
+    gmail_oauth_client_secret: str = ""
+    # Optional: Trigger task callback target (usually same as this API)
+    control_plane_callback_url: str = ""
+    # Optional Postgres: set AI_TEAMMATES_DATABASE_URL=postgresql+psycopg://... (SQLite remains default).
+    # Do not auto-migrate production data without an explicit approved plan.
     # Milestone 7 — memory / skills / workflows
     skills_root_dir: str = "./data/skills"
     memory_max_retrieve: int = 12

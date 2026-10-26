@@ -122,9 +122,11 @@ class ToolRegistry:
                 resolve_browser=resolve_browser,
             )
         if computer_manager is not None:
+            from .computers.desktop_tools import register_desktop_tools
             from .computers.workspace_tools import register_workspace_tools
 
             register_workspace_tools(self, computer_manager, timeout_seconds)
+            register_desktop_tools(self, computer_manager, max(timeout_seconds, 30.0))
         # Memory tools are registered from main after MemoryService exists (optional).
 
     def register(self, tool: ToolSpec) -> None:

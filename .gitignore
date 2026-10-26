@@ -6,9 +6,25 @@ dist/
 __pycache__/
 *.pyc
 backend/.env
+# Local GCP / cloud credentials (never commit)
+**/.ai-teammates/
+**/sa-*.json
+**/gcp-credentials*.json
+*-sa.json
 backend/data/
 backend/data/browser_artifacts/
 backend/*.db
 backend/test_*.db
 backend/pytest_cache/
 .pytest_cache/
+
+# local neon URL handoff (never commit)
+backend/neon.url.txt
+
+# Trigger.dev local runtime
+.trigger
+# Root env for TRIGGER_SECRET_KEY (never commit)
+.env
+.env.local
+scripts/gcp/last-deploy.log
+

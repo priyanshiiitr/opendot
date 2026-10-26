@@ -7,3 +7,12 @@ sqlalchemy>=2.0,<3
 tzdata>=2024.1
 uvicorn[standard]>=0.32,<1
 pytest>=8,<9
+# Optional until credit-funded GCP mode is enabled; FakeGcpComputeClient used in tests.
+google-cloud-compute>=1.19,<2
+google-auth>=2.29,<3
+# Daytona managed sandboxes (cloud_sandbox provider). FakeDaytonaClient used in tests.
+daytona>=0.21,<1
+# Optional Clerk JWT verification (only needed when AI_TEAMMATES_CLERK_ENABLED=true).
+PyJWT[crypto]>=2.8,<3
+# Optional Neon/Postgres driver when AI_TEAMMATES_DATABASE_URL uses postgresql+psycopg://
+psycopg[binary]>=3.1,<4
