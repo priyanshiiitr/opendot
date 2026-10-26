@@ -10,7 +10,7 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from .automations import AutomationService, AutomationWorker
+from .automations import AutomationService, AutomationWorker, JobDispatcher
 from .automations.service import AutomationError
 from .automations.webhooks import build_webhook_router
 from .browser import NavigationPolicy
@@ -102,13 +102,22 @@ skill_registry.ensure_builtin_seeded()
 
 # Tests may replace credential_store / connector_manager before requests.
 credential_store = build_credential_store()
-connector_manager = ConnectorManager(credential_store, SessionLocal, registry)
+connector_manager = ConnectorManager(credential_store, SessionLocal, registry, settings)
 runtime = AgentRuntime(settings, registry, PermissionBroker(), computer_manager, memory_service)
 automation_service = AutomationService(settings)
 automation_worker = AutomationWorker(settings, SessionLocal, runtime, automation_service)
+job_dispatcher = JobDispatcher(settings, automation_worker)
 team_service = TeamService(settings)
 team_coordinator = TeamCoordinator(settings, SessionLocal, runtime, team_service)
 remote_access = RemoteAccessService(settings)
+from .auth import ClerkAuth
+
+clerk_auth = ClerkAuth(
+    enabled=settings.clerk_enabled,
+    jwks_url=settings.clerk_jwks_url,
+    issuer=settings.clerk_issuer,
+    audience=settings.clerk_audience,
+)
 
 
 @asynccontextmanager
@@ -119,11 +128,11 @@ async def lifespan(_app: FastAPI):
     with SessionLocal() as db:
         team_coordinator.reconcile_on_startup(db)
     connector_manager.refresh_tools()
-    await automation_worker.start()
+    await job_dispatcher.start()
     try:
         yield
     finally:
-        await automation_worker.stop()
+        await job_dispatcher.stop()
         await computer_manager.shutdown()
 
 
@@ -141,7 +150,7 @@ class RemoteAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         with SessionLocal() as db:
             try:
-                session = authorize_request(request, db, settings, remote_access)
+                session = authorize_request(request, db, settings, remote_access, clerk=clerk_auth)
                 request.state.device_session = session
             except HTTPException as exc:
                 return Response(
@@ -199,17 +208,53 @@ def ready() -> dict:
     try:
         with SessionLocal() as db:
             db.execute(__import__("sqlalchemy").text("SELECT 1"))
-        worker_ok = (not settings.automation_worker_enabled) or (automation_worker._task is not None and not automation_worker._task.done())
+        worker_ok = (not settings.automation_worker_enabled) or (
+            automation_worker._task is not None and not automation_worker._task.done()
+        )
+        dialect = _database_dialect()
         return {
             "ready": True,
             "database": True,
+            "database_dialect": dialect,
+            "database_note": (
+                "SQLite default. Optional Neon/Postgres: set AI_TEAMMATES_DATABASE_URL="
+                "postgresql+psycopg://... (no automatic production cutover)."
+                if dialect == "sqlite"
+                else "Non-SQLite URL active (e.g. Neon/Postgres)."
+            ),
             "worker_enabled": settings.automation_worker_enabled,
             "worker_running": worker_ok,
+            "durable_execution": job_dispatcher.describe(),
+            "clerk": clerk_auth.describe(),
+            "oauth_connectors_enabled": settings.oauth_connectors_enabled,
+            "cloud_sandbox_enabled": settings.computer_cloud_sandbox_enabled,
+            "computer_allow_billable": settings.computer_allow_billable,
             "remote_access_enabled": settings.remote_access_enabled,
             "bind_host": settings.bind_host,
         }
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(503, f"Not ready: {exc}") from exc
+
+
+def _database_dialect() -> str:
+    from . import database as database_mod
+
+    try:
+        return database_mod.engine.dialect.name
+    except Exception:
+        return "unknown"
+
+
+@app.get("/api/auth/status")
+def auth_status() -> dict:
+    """Which auth modes are active (no secrets)."""
+    return {
+        "local_pairing": True,
+        "remote_access_enabled": settings.remote_access_enabled,
+        "local_trust_loopback": settings.local_trust_loopback,
+        "clerk": clerk_auth.describe(),
+        "note": "Clerk is optional and off by default. Pairing remains the desktop companion path.",
+    }
 
 
 @app.get("/api/connectors", response_model=list[ConnectorStatusOut])
@@ -240,6 +285,127 @@ async def telegram_verify() -> dict:
 @app.post("/api/connectors/telegram/disconnect", response_model=ConnectorStatusOut)
 async def telegram_disconnect() -> dict:
     return await connector_manager.disconnect_telegram()
+
+
+@app.get("/api/connectors/{connector_id}/authorize")
+def connector_oauth_authorize(connector_id: str) -> dict:
+    """Start GitHub/Gmail OAuth — returns authorize_url (open in browser)."""
+    if connector_id not in ("github", "gmail"):
+        raise HTTPException(404, "Unknown OAuth connector")
+    try:
+        connector = connector_manager.get(connector_id)
+        begin = getattr(connector, "begin_authorize", None)
+        if begin is None:
+            raise HTTPException(400, "Connector does not support OAuth authorize")
+        return begin()
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/connectors/{connector_id}/callback")
+async def connector_oauth_callback(
+    connector_id: str,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+):
+    """OAuth redirect target — stores token in keyring, never returns the secret."""
+    from fastapi.responses import HTMLResponse
+
+    if connector_id not in ("github", "gmail"):
+        raise HTTPException(404, "Unknown OAuth connector")
+    if error:
+        return HTMLResponse(
+            f"<html><body><h1>{connector_id} OAuth denied</h1><p>{error}</p></body></html>",
+            status_code=400,
+        )
+    if not code or not state:
+        raise HTTPException(400, "Missing code or state")
+    try:
+        connector = connector_manager.get(connector_id)
+        finish = getattr(connector, "finish_authorize", None)
+        if finish is None:
+            raise HTTPException(400, "Connector does not support OAuth callback")
+        status = await finish(code, state)
+        connector_manager.refresh_tools()
+        msg = status.message or "Connected"
+        return HTMLResponse(
+            f"<html><body><h1>{connector_id} connected</h1><p>{msg}</p>"
+            "<p>You can close this tab and return to AI Teammates.</p></body></html>"
+        )
+    except RuntimeError as exc:
+        return HTMLResponse(
+            f"<html><body><h1>OAuth failed</h1><p>{exc}</p></body></html>",
+            status_code=400,
+        )
+
+
+@app.post("/api/connectors/{connector_id}/disconnect", response_model=ConnectorStatusOut)
+async def connector_oauth_disconnect(connector_id: str) -> dict:
+    if connector_id not in ("github", "gmail"):
+        raise HTTPException(404, "Unknown connector")
+    status = await connector_manager.get(connector_id).disconnect()
+    connector_manager.refresh_tools()
+    return status.public_dict()
+
+
+@app.post("/api/connectors/{connector_id}/verify", response_model=ConnectorStatusOut)
+async def connector_oauth_verify(connector_id: str) -> dict:
+    if connector_id not in ("github", "gmail"):
+        raise HTTPException(404, "Unknown connector")
+    status = await connector_manager.get(connector_id).verify()
+    connector_manager.refresh_tools()
+    return status.public_dict()
+
+
+@app.post("/api/internal/durable/execute")
+async def durable_execute_callback(request: Request) -> dict:
+    """Trigger.dev task callback — shared-secret gate; executes queued AutomationRun if present."""
+    from .automations.jobs import JobEnvelope
+
+    expected = (settings.trigger_webhook_secret or "").strip()
+    got = (request.headers.get("X-AI-Teammates-Signature") or "").strip()
+    if not expected or got != expected:
+        raise HTTPException(401, "Invalid durable callback signature")
+    body = await request.json()
+    run_id = str(body.get("run_id") or "")
+    if not run_id:
+        raise HTTPException(400, "run_id required")
+    # Enqueue acknowledgment path: mirror to Trigger is fire-and-forget; local worker claims runs.
+    # If a JobEnvelope arrives without a DB run, return accepted for observability only.
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "job_type": body.get("job_type"),
+        "note": "Callback accepted. Local AutomationWorker claims queued runs when in_process is active.",
+        "envelope": JobEnvelope(
+            job_type=str(body.get("job_type") or "automation_run"),
+            run_id=run_id,
+            teammate_id=body.get("teammate_id"),
+            payload=body.get("payload") or {},
+            idempotency_key=body.get("idempotency_key"),
+        ).as_dict(),
+    }
+
+
+@app.post("/api/internal/durable/enqueue-test")
+async def durable_enqueue_test() -> dict:
+    """Dev helper: enqueue a sample JobEnvelope via active JobDispatcher (Trigger smoke)."""
+    from .automations.jobs import JobEnvelope
+
+    try:
+        job_id = await job_dispatcher.enqueue(
+            JobEnvelope(
+                job_type="smoke_test",
+                run_id=f"smoke-{__import__('uuid').uuid4().hex[:12]}",
+                teammate_id=None,
+                payload={"source": "enqueue-test"},
+                idempotency_key=None,
+            )
+        )
+        return {"ok": True, "remote_id": job_id, "backend": job_dispatcher.active_name}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, str(getattr(exc, "reason", exc))) from exc
 
 
 @app.get("/api/teammates", response_model=list[TeammateOut])
@@ -822,6 +988,7 @@ def diagnostics(db: Session = Depends(get_db)) -> dict:
         "remote_access_enabled": settings.remote_access_enabled,
         "worker_enabled": settings.automation_worker_enabled,
         "worker_running": bool(worker_running),
+        "durable_execution": job_dispatcher.describe(),
         "bind_host": settings.bind_host,
         "active_automation_runs": active,
         "waiting_approvals": waiting,
